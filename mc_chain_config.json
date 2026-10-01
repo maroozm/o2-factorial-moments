@@ -1,0 +1,81 @@
+{
+    "propagation-service": {
+        "processRealData": "false",
+        "processMonteCarlo": "true",
+        "processRealDataWithPID": "false",
+        "processMonteCarloWithPID": "false"
+    },
+    "mult-cent-table": {
+        "processRun2": "false",
+        "processRun3": "true",
+        "processRun3WithGlobalCounters": "false",
+        "processMFT": "false",
+        "processMonteCarlo": "false",
+        "processMonteCarlo2Mults": "false",
+        "processCentralityRun2": "false",
+        "processCentralityRun3": "true"
+    },
+    "factorial-moments-task": {
+        "useITS": "false",
+        "useTPC": "false",
+        "useGlobal": "false",
+        "applyCheckPtForRec": "true",
+        "applyCheckPtForMC": "false",
+        "cfgEvSelkNoITSROFrameBorder": "true",
+        "cfgEvSelkNoTimeFrameBorder": "true",
+        "centralEta": "0.899999976",
+        "numPt": "3",
+        "ptMin": "0.200000003",
+        "dcaXY": "2.4000001",
+        "dcaZ": "2",
+        "cfgCutTpcChi2NCl": "2.5",
+        "cfgCutItsChi2NCl": "40",
+        "mintPCCls": "70",
+        "centLimits": {
+            "values": [
+                "0",
+                "5"
+            ]
+        },
+        "vertexXYZ": {
+            "values": [
+                "0.3",
+                "0.4",
+                "10"
+            ]
+        },
+        "ptCuts": {
+            "values": [
+                "0.2",
+                "2",
+                "0.4",
+                "2",
+                "0.4",
+                "1"
+            ]
+        },
+        "isApplySameBunchPileup": "true",
+        "isApplyGoodZvtxFT0vsPV": "true",
+        "cfgUseGoodITSLayerAllCut": "true",
+        "isApplyVertexITSTPC": "true",
+        "isApplyVertexTOFmatched": "true",
+        "isApplyVertexTRDmatched": "true",
+        "isApplyExtraCorrCut": "false",
+        "isApplyExtraPhiCut": "false",
+        "includeGlobalTracks": "false",
+        "includeTPCTracks": "false",
+        "includeITSTracks": "false",
+        "samplesize": "3",
+        "useMC": "true",
+        "useGlobalTrack": "false",
+        "cfgITScluster": "6",
+        "cfgTPCcluster": "80",
+        "cfgTPCnCrossedRows": "70",
+        "cfgTPCnCrossedRowsOverFindableCls": "0.800000012",
+        "reduceOutput": "0",
+        "processRun3": "false",
+        "processMCRec": "true",
+        "processMcRun2": "false",
+        "processRun2": "false"
+    }
+}

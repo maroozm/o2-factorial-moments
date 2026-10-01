@@ -1,0 +1,38 @@
+/
+# input AO2Ds (multi-GB, downloaded separately)
+*.root
+
+# build / install trees
+BUILD/
+bin/
+lib/
+lib64/
+share/
+stage/
+cmake_install.cmake
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# run outputs
+results/
+*.log
+dpl-config.json
+compilation_env.txt
+
+# ROOT / ACLiC artifacts
+*.so
+*.d
+*.pcm
+*.rootmap
+*.o
+*.pyc
+__pycache__/
+
+# local caches / secrets
+.ccdb/
+.aliopendata_cfg
+
+# open-data helper utilities (not part of the FM code)
+/upload/
+/CCDB_caching.md

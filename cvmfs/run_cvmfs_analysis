@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+set -eo pipefail
+
+cd "$(dirname "$0")/.."
+source ./enable >/dev/null 2>&1
+
+JSON="--configuration json://$PWD/mc_chain_config.json"
+SHM="--shm-segment-size 8589934592"
+AOD="--aod-file @${1:-$PWD/data/545312/file.list}"
+
+echo | \
+o2-analysis-event-selection-service -b ${JSON} ${AOD} ${SHM} --evselOpts.isMC 1 | \
+o2-analysis-propagationservice      -b ${JSON} ${AOD} ${SHM} | \
+o2-analysis-trackselection          -b ${JSON} ${AOD} ${SHM} | \
+o2-analysis-multcenttable           -b ${JSON} ${AOD} ${SHM} | \
+o2-analysis-cf-factorial-moments    -b ${JSON} ${AOD} ${SHM}
