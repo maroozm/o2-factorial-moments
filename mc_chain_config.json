@@ -21,6 +21,7 @@
         "useGlobal": "false",
         "applyCheckPtForRec": "true",
         "applyCheckPtForMC": "false",
+        "smearPhi": "true",
         "cfgEvSelkNoITSROFrameBorder": "true",
         "cfgEvSelkNoTimeFrameBorder": "true",
         "centralEta": "0.899999976",

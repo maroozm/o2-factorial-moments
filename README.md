@@ -3,8 +3,25 @@
 O2Physics task for the **normalized factorial moments** analysis of particle
 multiplicity fluctuations (ULM method), `o2-analysis-cf-factorial-moments`.
 
-Reference: P. Braun-Munzinger *et al.*, *Phys. Rev. C* **85**, 044914 (2012),
-[nucl-ex/1411.6083](https://arxiv.org/abs/nucl-ex/1411.6083).
+Reference: R. C. Hwa and C. B. Yang, *Phys. Rev. C* **85**, 044914 (2012),
+[doi:10.1103/PhysRevC.85.044914](https://doi.org/10.1103/PhysRevC.85.044914).
+
+```bibtex
+@article{PhysRevC.85.044914,
+  title = {Local multiplicity fluctuations as a signature of critical hadronization in heavy-ion collisions at TeV energies},
+  author = {Hwa, Rudolph C. and Yang, C. B.},
+  journal = {Phys. Rev. C},
+  volume = {85},
+  issue = {4},
+  pages = {044914},
+  numpages = {11},
+  year = {2012},
+  month = {Apr},
+  publisher = {American Physical Society},
+  doi = {10.1103/PhysRevC.85.044914},
+  url = {https://link.aps.org/doi/10.1103/PhysRevC.85.044914}
+}
+```
 
 This repository contains only the factorial-moment code, the JSON
 configuration, the run/merge/plot scripts and the documentation needed to
@@ -86,8 +103,20 @@ Main task options:
 | `centLimits` | `0, 5` | accepted centrality range (FT0C, Run 3) |
 | `centralEta` | 0.9 | `|eta|` cut |
 | `vertexXYZ` | `0.3, 0.4, 10` | vertex x, y (cm) and z (cm) cuts |
-| `dcaXY`, `dcaZ` | 0.1, 1.0 | DCA cuts |
-| `useMC` | false | use MC truth (needed for `processMonteCarlo`) |
+| `dcaXY`, `dcaZ` | 0.1, 1.0 | echoed into `metaConfig` only, **not applied** (see note) |
+| `useMC` | false | echoed into `metaConfig`; MC handling follows the process switches |
+| `smearPhi` | true | randomise track phi (Gaussian, sigma=2pi) before filling the eta-phi lattices |
+
+Note on DCA: the cut that is actually applied to reconstructed tracks is the
+hard-coded ITS parameterisation `|dca_xy| < 0.0105 + 0.035 / pT^1.1`
+(`kDcaXY0/1/2`); there is no DCA_z cut. The following options are accepted (the
+shipped JSON files set them) but are currently **not applied by any cut** - they
+are kept only so the configuration files keep parsing: `cfgCutTpcChi2NCl`,
+`cfgCutItsChi2NCl`, `cfgITScluster`, `cfgTPCcluster`, `cfgTPCnCrossedRows`,
+`cfgTPCnCrossedRowsOverFindableCls`, `isApplyVertexTOFmatched`,
+`isApplyVertexTRDmatched`, `isApplyExtraCorrCut`, `isApplyExtraPhiCut`,
+`includeGlobalTracks`, `includeTPCTracks`, `includeITSTracks`, `useGlobalTrack`,
+`reduceOutput`.
 
 ## 4. Running on CVMFS (lxplus and friends)
 
@@ -205,6 +234,10 @@ Written by device `factorial-moments-task`, directory `factorial-moments-task`,
 * `metaConfig` - a 1-bin `TH1D` whose **title** carries the effective job
   configuration (see the `metaConfig` section below). Histogram titles are taken
   from the first input of `hadd`, so the merged file stays self-describing.
+* `mEventSelected` - event cut-flow, 10 labelled bins (`all`, `sel8`, the
+  border/pileup/ITS/z-vertex bits, `centrality`, `accepted`). `processRun3`
+  fills the border and `kIsGoodITSLayersAll` steps, `processMCRec` fills
+  `kIsVertexITSTPC` instead; steps a mode never applies stay empty.
 
 ## 7. metaConfig
 
@@ -213,7 +246,7 @@ effective configuration of the job (no `;` in it, otherwise ROOT would split the
 string into axis titles):
 
 ```
-FMtask centLimits=0,5 numPt=3 centralEta=0.9 samplesize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
+FMtask centLimits=0,5 numPt=3 centralEta=0.9 samplesize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
 ```
 
 Histogram titles are not summed by `hadd`, so the merged file keeps this string.
@@ -231,6 +264,14 @@ is recommended once after upgrading the task.
 * The factorial numerator uses the falling factorial
   `n!/(n-q)! = n*(n-1)*...*(n-q+1)` evaluated with an explicit product loop:
   `TMath::Factorial` overflows to `inf` for n >= 171.
+* `checkpT()` can replace the track azimuth with `gRandom->Gaus(phi, 2*pi)`
+  wrapped into `[0, 2*pi)` before filling the eta-phi lattices, i.e. the phi used
+  for the factorial moments is effectively randomised. The switch is the
+  `smearPhi` option (default `true`, recorded in `metaConfig`); the validated
+  `.dat` files were produced with it on.
+* The eta-phi lattices are cleared lazily at the start of an event: only the
+  pT bins that saw tracks in the previous event are `Reset()`, which is
+  equivalent to clearing all of them but avoids zeroing ~5 MB of bins per event.
 * `fqEvent` and `binConEvent` are accumulated unconditionally (not only when a
   sample is flushed) so both sums always run over exactly the same set of
   events.
