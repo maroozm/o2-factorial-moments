@@ -99,7 +99,7 @@ Main task options:
 |---|---|---|
 | `numPt` | 5 | number of pT bins (must match `ptCuts`) |
 | `ptCuts` | `0.2, 2` | bin edges in GeV/c, `2*numPt` values |
-| `samplesize` | 100 | events per subsample (defines `F_q` samples) |
+| `sampleSize` | 100 | events per subsample (defines `F_q` samples) |
 | `centLimits` | `0, 5` | accepted centrality range (FT0C, Run 3) |
 | `centralEta` | 0.9 | `|eta|` cut |
 | `vertexXYZ` | `0.3, 0.4, 10` | vertex x, y (cm) and z (cm) cuts |
@@ -111,10 +111,10 @@ Note on DCA: the cut that is actually applied to reconstructed tracks is the
 hard-coded ITS parameterisation `|dca_xy| < 0.0105 + 0.035 / pT^1.1`
 (`kDcaXY0/1/2`); there is no DCA_z cut. The following options are accepted (the
 shipped JSON files set them) but are currently **not applied by any cut** - they
-are kept only so the configuration files keep parsing: `cfgCutTpcChi2NCl`,
-`cfgCutItsChi2NCl`, `cfgITScluster`, `cfgTPCcluster`, `cfgTPCnCrossedRows`,
-`cfgTPCnCrossedRowsOverFindableCls`, `isApplyVertexTOFmatched`,
-`isApplyVertexTRDmatched`, `isApplyExtraCorrCut`, `isApplyExtraPhiCut`,
+are kept only so the configuration files keep parsing: `maxTPCChi2NCl`,
+`maxITSChi2NCl`, `minITSClusters`, `minTPCClusters`, `minTPCCrossedRows`,
+`minTPCCrossedRowsOverFindableCls`, `evSelVertexTOFmatched`,
+`evSelVertexTRDmatched`, `applyExtraCorrCut`, `applyExtraPhiCut`,
 `includeGlobalTracks`, `includeTPCTracks`, `includeITSTracks`, `useGlobalTrack`,
 `reduceOutput`.
 
@@ -215,7 +215,7 @@ Written by device `factorial-moments-task`, directory `factorial-moments-task`,
 * `mFinalFq{q}_bin{N}`, `mFinalFq{q}Sampled_bin{N}`, `mFinalAvBin*` - filled with
   `Fill(iM, value)` and never reset, so `hadd` adds them. Value =
   `content / (GetEntries()/52)`, where `GetEntries()/52` = number of samples
-  (samplesize=3 events each) = 6+8+8+7 = 29 for the four AO2Ds.
+  (sampleSize=3 events each) = 6+8+8+7 = 29 for the four AO2Ds.
 * `mFqSum{q}_bin{N}` / `mFqSq{q}_bin{N}` (`TH1D`) - sum and sum of squares of the
   same per-sample Fq. Merge-safe, so the mean **and its error** can be rebuilt
   after `hadd` of any number of jobs:
@@ -246,7 +246,7 @@ effective configuration of the job (no `;` in it, otherwise ROOT would split the
 string into axis titles):
 
 ```
-FMtask centLimits=0,5 numPt=3 centralEta=0.9 samplesize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
+FMtask centLimits=0,5 numPt=3 centralEta=0.9 sampleSize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
 ```
 
 Histogram titles are not summed by `hadd`, so the merged file keeps this string.
