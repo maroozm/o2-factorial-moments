@@ -55,7 +55,7 @@ struct FactorialMomentsTask {
   Configurable<bool> useGlobal{"useGlobal", true, "Select global tracks"};
   Configurable<bool> applyCheckPtForRec{"applyCheckPtForRec", false, "Apply checkpT for reconstructed tracks"};
   Configurable<bool> applyCheckPtForMC{"applyCheckPtForMC", true, "Apply checkpT for MC-generated tracks"};
-  Configurable<bool> smearPhi{"smearPhi", true, "Randomise track phi with a Gaussian of sigma=2pi before filling the eta-phi lattices"};
+  Configurable<bool> smearPhi{"smearPhi", false, "Randomise track phi with a Gaussian of sigma=2pi before filling the eta-phi lattices"};
   Configurable<bool> cfgEvSelkNoITSROFrameBorder{"cfgEvSelkNoITSROFrameBorder", true, "ITSROFrame border event selection cut"};
   Configurable<bool> cfgEvSelkNoTimeFrameBorder{"cfgEvSelkNoTimeFrameBorder", true, "TimeFrame border event selection cut"};
   Configurable<float> centralEta{"centralEta", 0.9, "eta limit for tracks"};

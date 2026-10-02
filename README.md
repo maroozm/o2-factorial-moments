@@ -105,7 +105,7 @@ Main task options:
 | `vertexXYZ` | `0.3, 0.4, 10` | vertex x, y (cm) and z (cm) cuts |
 | `dcaXY`, `dcaZ` | 0.1, 1.0 | echoed into `metaConfig` only, **not applied** (see note) |
 | `useMC` | false | echoed into `metaConfig`; MC handling follows the process switches |
-| `smearPhi` | true | randomise track phi (Gaussian, sigma=2pi) before filling the eta-phi lattices |
+| `smearPhi` | false | randomise track phi (Gaussian, sigma=2pi) before filling the eta-phi lattices (the shipped JSONs set it to `true`) |
 
 Note on DCA: the cut that is actually applied to reconstructed tracks is the
 hard-coded ITS parameterisation `|dca_xy| < 0.0105 + 0.035 / pT^1.1`
@@ -267,8 +267,9 @@ is recommended once after upgrading the task.
 * `checkpT()` can replace the track azimuth with `gRandom->Gaus(phi, 2*pi)`
   wrapped into `[0, 2*pi)` before filling the eta-phi lattices, i.e. the phi used
   for the factorial moments is effectively randomised. The switch is the
-  `smearPhi` option (default `true`, recorded in `metaConfig`); the validated
-  `.dat` files were produced with it on.
+  `smearPhi` option (default `false`, recorded in `metaConfig`); the shipped
+  JSON files set it to `true` and the validated `.dat` files were produced with
+  it on.
 * The eta-phi lattices are cleared lazily at the start of an event: only the
   pT bins that saw tracks in the previous event are `Reset()`, which is
   equivalent to clearing all of them but avoids zeroing ~5 MB of bins per event.
