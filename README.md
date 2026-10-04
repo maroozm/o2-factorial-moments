@@ -107,6 +107,7 @@ Main task options:
 | `useMC` | false | echoed into `metaConfig`; MC handling follows the process switches |
 | `smearPhi` | false | randomise track phi (Gaussian, sigma=2pi) before filling the eta-phi lattices (the shipped JSONs set it to `true`) |
 | `flushTailSample` | true | flush a partial group of events as an extra subsample at end of stream (recorded in `metaConfig` as `flushTail=`) |
+| `nSlots` | 1250 | hash buckets for merge-safe subsampling, `slot = splitmix64(globalBC) % nSlots` (recorded in `metaConfig` as `nSlots=`). **Must be identical in every job of a campaign**, see below |
 
 Note on DCA: the cut that is actually applied to reconstructed tracks is the
 hard-coded ITS parameterisation `|dca_xy| < 0.0105 + 0.035 / pT^1.1`
@@ -121,10 +122,17 @@ are kept only so the configuration files keep parsing: `maxTPCChi2NCl`,
 
 ## 4. Running on CVMFS (lxplus and friends)
 
-Input AO2Ds: `data/545312/` (`AO2D_001.root`, `AO2D_002.root`, `AO2D_003.root`,
-`AO2D_005.root`, listed in `data/545312/file.list`) - ALICE Run 3 MC,
-LHC25f3 / 545312. The multi-GB `.root` files are downloaded separately and are
+Input AO2Ds: `data/545312/` - ALICE Run 3 MC, LHC25f3 / 545312, 49 files
+`AO2D_001.root` ... `AO2D_050.root` listed in `data/545312/file.list` (there is
+no `AO2D_004`: the production's `AOD/` directory skips `004/` as well). The
+multi-GB `.root` files are downloaded separately from
+`alien:///alice/sim/2025/LHC25f3/0/545312/AOD/<NNN>/AO2D.root` and are
 git-ignored.
+
+```
+alien.py cp alien:///alice/sim/2025/LHC25f3/0/545312/AOD/007/AO2D.root \
+           file://$PWD/data/545312/AO2D_007.root
+```
 
 ```
 ./run_mc.sh                            # every file of data/545312/file.list
@@ -158,6 +166,17 @@ Gotchas learned the hard way:
 * Opening files through `/eos/...` prints a benign
   `TNetXNGFile::Open ... Permission denied` error; the file is opened locally
   anyway.
+* An AO2D read can fail **transiently**: the reader has been seen to die with
+  `Couldn't get TTree "DF_<id>/O2track" from ...` plus
+  `websocket_callback: Error while reading from websocket`, and to exit 128 with
+  no `AnalysisResults.root` at all - even though the file is byte-identical to
+  the grid and opens cleanly (checked DF by DF). It has passed unchanged on
+  immediate retry, so treat a job that produced no output as retryable before
+  suspecting the file. Note that no AO2D in this production carries an `O2track`
+  tree at all, only `O2track_iu`, so that message is not by itself diagnostic of
+  a bad file. If one file fails, `run_mc.sh` stops with it: re-run just that
+  file (`./run_mc.sh data/545312/AO2D_<N>.root`) and confirm the output by
+  checking `sum(slots/nEv) == mEventSelected[accepted]`.
 
 ### Running inside a CVMFS singularity container
 
@@ -200,13 +219,110 @@ file (`q = 2..7` here), where `err` = `sigma(Fq)/mean(Fq)` = the error on
 `ln(Fq)`; points with `Fq <= 0` are written as `-999 -999`.
 
 `validateFMo2.C(<outdir>)` (default `./results`) cross-checks those `.dat`
-files against an independent pooled recomputation from the four per-file
+files against an independent pooled recomputation from the per-file
 results (expected agreement: ~1e-7 on the value, ~1e-5 on the error, i.e. the
 float storage level):
 
 ```
 root -l -q -e '.x validateFMo2.C+("./results")'
 ```
+
+### Subsamples after `hadd` (`slotpool.C`)
+
+Hyperloop delivers exactly **one** merged `AnalysisResults.root`, and `hadd`
+cannot split anything back apart - so if subsamples of a chosen size `K` have to
+exist *after* the merge, they must be reconstructable from a merge-safe
+representation. Besides the old `sampleSize` path the task therefore fills a
+second set of histograms (`slots/...`, see the output section) in which every
+event is binned into a hash bucket. Pooling is then a post-processing step:
+
+```
+mkdir -p results/merged
+hadd -f results/merged/AnalysisResults.root results/AO2D_*/AnalysisResults.root
+root -l -b -q 'slotpool.C+("results/merged/AnalysisResults.root", 20, "results/merged/AnalysisResults.root")'
+```
+
+`slotpool.C(<file>, <K>, <baseline>, <csv>, <keepTail>)` - `csv` and `keepTail`
+are optional (`csv` defaults to `slotpool.csv`, `keepTail` to `0`; pass `""` for
+`baseline` to skip the old-path comparison). It pools consecutive **non-empty**
+slots greedily in index order until the accumulated event count reaches `K`, and
+recomputes for every pT bin, order and M bin
+
+```
+Fq = (Sfq / n) / (Socc / n)^Q        n = sum of slots/nEv over the pooled set
+```
+
+where `Q` is the object suffix `o{q}` (2..7), i.e. exactly the exponent
+`flushSample()` uses. The mean and its error are taken over the pooled groups;
+on the old side the statistics are rebuilt from the merged
+`mFqSum`/`mFqSq`/`mSubsampleEvents`, because `mFqError` is per-job and does not
+survive `hadd`.
+
+Properties worth knowing:
+
+* **Any `K` works, without rerunning anything.** Splitting is never possible
+  after the fact, only merging, so `nSlots` should be chosen generous enough
+  that the smallest `K` you will ever want is still reachable; then larger `K`
+  are obtained by pooling further.
+* `nSlots` only sets the *granularity*. It does not have to relate to `K` or to
+  the number of jobs - the pooler never needs to know it.
+* **`nSlots` must be identical in every job** of a campaign, otherwise two jobs
+  hash the same `globalBC` into different buckets. This is the one failure mode
+  that nothing else can see: `hadd` keeps the axis of its first input without
+  warning (measured: a 1250-bin and a 1000-bin `slots/nEv` merge with `rc=0` and
+  no diagnostic), and since every job still counts each event exactly once, the
+  `mEventSelected` invariant passes on the corrupted file too. The task
+  therefore writes `slots/params` (bin 1 = number of merged jobs, bin 2 = sum of
+  their `nSlots`), and `slotpool.C` prints `jobs merged` / `mean nSlots` and
+  raises an `[!! nSlots MISMATCH]` banner whenever that mean disagrees with
+  `GetNbinsX()` of `slots/nEv`. `nSlots` is additionally recorded in
+  `metaConfig` for humans, but note that titles come from the first `hadd`
+  input only, so `metaConfig` alone cannot detect this.
+* **Tail**: `K` may not divide the total exactly. With `keepTail=0` (default)
+  the trailing partial group is dropped, so every subsample really holds
+  `>= K` events; with `keepTail=1` it is kept and may hold `< K`, mirroring
+  `flushTailSample`. The macro prints how many events each choice drops.
+* **Invariant it asserts**: `mEventSelected[accepted]` must equal the total
+  `slots/nEv`, printed as `[OK]`. Any mismatch means events were lost or
+  double-counted between the two representations.
+* Empty buckets are skipped (they carry `nEv = 0`), so the average occupancy
+  `lambda = N_events / nSlots` does not have to be near 1.
+* Only `processMCRec` has been exercised end to end; `processRun3` and
+  `processMcRun2`/`processRun2` compile and take the same code path but have not
+  been run.
+
+**Validation.**
+
+1. *Exactness.* With `sampleSize` set high enough that the old path emits one
+   subsample per job, old and new describe the same event set, and with `K = 0`
+   (pool everything into a single group) the macro becomes a direct
+   comparison of the two computations. On the four-AO2D run (88 accepted
+   events) all 936 (pT, q, M) cells agreed to a worst relative difference of
+   `1.2e-7` - pure float32-vs-double storage noise.
+2. *Post-`hadd` on a real campaign.* 49 AO2Ds run as 49 separate jobs, then
+   `hadd`ed, giving 1247 accepted events over 1250 slots (794 non-empty;
+   Poisson expects `1250*(1-e^-1) = 790`). Every one of the 49 outputs
+   satisfied `sum(slots/nEv) == mEventSelected[accepted]` individually, and
+   `slots/params` reports `jobs = 49`, `mean nSlots = 1250`, matching the
+   merged axis. At `K = 25` the pooler recovers **49 groups of ~25 events with
+   0 events dropped**, i.e. exactly the same subsample count and size as the
+   old path, so the two are directly comparable: of the 863 cells where at
+   least one side is non-zero, **100 % agree within 1 sigma**, chi2/dof = 0.05,
+   rms z = 0.22 and median z = -0.05 at every order q = 2..7 (no bias). The
+   chi2 is low because the two paths partition the *same* events and are
+   therefore strongly correlated, not because the test is weak. In the
+   well-measured core (lowest multiplicity bin, q <= 4) the worst relative
+   difference is 0.042 % and the median 0.014 %. At `K = 20` the pooler forms
+   60 groups instead (1242 events, 5 dropped to the tail) and the same picture
+   holds.
+
+At a finite `K` the two sides are *different* groupings of the same events, so
+raw agreement degrades with order and multiplicity even though the estimates
+stay statistically consistent: the q=2, M=4 cells match to ~1e-4 while rare
+multiplicity bins at high `q` scatter, because a group that happens to contain
+none of the rare events records a structural zero. That scatter is the
+statistical resolution of the method, not a discrepancy - it is exactly the
+error bar the method reports.
 
 ## 6. Output histograms and merging
 
@@ -216,8 +332,8 @@ Written by device `factorial-moments-task`, directory `factorial-moments-task`,
 * `mFinalFq{q}_bin{N}`, `mFinalFq{q}Sampled_bin{N}`, `mFinalAvBin*` - filled with
   `Fill(iM, value)` and never reset, so `hadd` adds them. Value =
   `content / (GetEntries()/52)`, where `GetEntries()/52` = number of samples
-  (sampleSize=3 events each, plus one tail flush per AO2D) = 7+8+8+7 = 30 for
-  the four AO2Ds.
+  (`sampleSize` events each, plus one tail flush per AO2D - e.g. 7+8+8+7 = 30
+  for four AO2Ds).
 * `mFqSum{q}_bin{N}` / `mFqSq{q}_bin{N}` (`TH1D`) - sum and sum of squares of the
   same per-sample Fq. Merge-safe, so the mean **and its error** can be rebuilt
   after `hadd` of any number of jobs:
@@ -244,6 +360,31 @@ Written by device `factorial-moments-task`, directory `factorial-moments-task`,
   the group (bin `sampleSize` = complete groups, smaller bins = end-of-stream
   tail flushes).
 
+The merge-safe subsampling representation (see `slotpool.C` above), all under
+`slots/` and all written with `SetBinContent`:
+
+* `slots/nEv` (`TH1F`) - `X = slot`, number of accepted events hashed into each
+  bucket. This is the `n` of the formulas below and the source of the invariant
+  `sum == mEventSelected[accepted]`.
+* `slots/params` (`TH1D`, 2 bins) - campaign marker: bin 1 = 1 per job (so it
+  accumulates the number of merged jobs), bin 2 = that job's `nSlots` (so it
+  accumulates their sum). Lets `slotpool.C` detect jobs that disagreed on
+  `nSlots`, which `hadd` and the event-count invariant both miss.
+* `slots/sumOcc_pt{N}` (`TH2F`) - `X = slot`, `Y = M`, sum of `binConEvent`
+  over the events of that slot and M bin.
+* `slots/sumFq_pt{N}_o{q}` (`TH2F`) - `X = slot`, `Y = M`, sum of `fqEvent`,
+  `q = 2..7`.
+
+They are plain histograms, so `hadd` adds them cell by cell and the merged file
+is indistinguishable from one written by a single job covering the whole sample.
+This is the property the TTree alternative could not offer, and the reason a
+dense `TH2F` was chosen over `THnSparse`/`StepTHn`: measured on this chain the
+slot output is ~9.4 MB in memory and ~7.9 MB on disk, against ~14.0/13.6 MB for
+a `StepTHnF` carrying only the sums and ~200 MB for a `THnSparse` of the same
+shape. Sum-of-squares is deliberately *not* stored: the spread that matters is
+**between** subsamples, and that is produced by the pooler, which knows which
+slots it grouped.
+
 ## 7. metaConfig
 
 `init()` registers a 1-bin histogram `metaConfig` whose **title** carries the
@@ -251,10 +392,11 @@ effective configuration of the job (no `;` in it, otherwise ROOT would split the
 string into axis titles):
 
 ```
-FMtask centLimits=0,5 numPt=3 centralEta=0.9 sampleSize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 flushTail=1 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
+FMtask centLimits=0,5 numPt=3 centralEta=0.9 sampleSize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 flushTail=1 nSlots=1250 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
 ```
 
-Histogram titles are not summed by `hadd`, so the merged file keeps this string.
+Histogram titles are not summed by `hadd`, so the merged file keeps this string -
+which is how `nSlots` is checked to be consistent across a campaign.
 Files produced before `metaConfig` existed fall back to the ranges observed in
 the QA histograms - for a truncated distribution that reports the *observed*
 range (e.g. `1-5 %` instead of the configured `0-5 %`), so re-running the chain
@@ -291,6 +433,52 @@ is recommended once after upgrading the task.
   case) and inflate the error modestly. Set `flushTailSample: false` to restore
   the old drop-the-tail behaviour; a killed job never reaches the callback, so
   its tail is lost regardless.
+* **Why `globalBC` and not a per-file or per-DataFrame index.** The bucket has
+  to be a pure function of the event, because Hyperloop is free to chunk the
+  input differently from one job to the next and nothing survives the merge
+  except the event itself. `collision.globalBC` is the only such identifier with
+  the right properties: verified on the production AO2Ds, 868/868 collisions
+  carry a unique, non-zero `globalBC` spanning ~1e11, with exactly one distinct
+  BC per collision. The raw `fIndexBCs` column is only meaningful *within* one
+  DataFrame (38 DFs, 3-38 collisions each) and would silently collapse under
+  re-chunking. The mapping is `slot = splitmix64(globalBC) % nSlots`;
+  splitmix64 (Steele, Lea, Flood 2014) is a 64-bit integer finaliser, and
+  `globalBC` increments linearly, so a plain `% nSlots` would put consecutive
+  BCs in consecutive slots and correlate the buckets with time. Measured on
+  `AO2D_001`: 638/1250 slots used (626 expected), max occupancy 4,
+  chi2/dof = 0.93.
+* **Why a dense `TH2F` filled with `SetBinContent`.** The three candidates were
+  measured rather than assumed. Filling a `TH2F` with `Fill(x, y, w)` makes
+  ROOT allocate `fSumw2` as a `TArrayD` at 8 bytes/cell, inflating the slot
+  output to 27.4 MB in memory and 24.6 MB on disk; `SetBinContent` never
+  triggers that and needs no sumw2 at all, giving 9.4 MB / 7.9 MB. A
+  `StepTHnF` costs ~14.0 / 13.6 MB for the sums alone (plus occupancy
+  bookkeeping, ~16.6 / 15.9 MB), emits one INFO line per bucket, and silently
+  discards under/overflow. `THnSparse` was rejected outright: the grid is dense
+  in practice, so its ~200 MB merge cost is pure overhead. `hadd` of the `TH2F`
+  layout was verified on 36 objects including the `nEv` sum.
+* The pooler walks slots in **index order**, and that index is hash order, so
+  group *g*'s membership depends only on where the boundaries fall and not on
+  how the events happen to be distributed over time - which is what lets one
+  merged file be reused at any `K`. Pooling can only ever merge, never split,
+  so the rule of thumb for choosing `nSlots` is that the smallest `K` you will
+  want must stay reachable. Each group stops as soon as it clears `K` and can
+  overshoot it by less than the largest bucket it contains, so with `N` events
+  the number of groups `G` satisfies `floor(N / (K + b_max)) <= G <= floor(N/K)`,
+  where `b_max` is the largest bucket. The two ends coincide while buckets stay
+  well below `K` - which is what a generous `nSlots` buys - and only a too-coarse
+  `nSlots` costs you groups. Concretely, `[15, 15, 15]` at `K = 20` yields one
+  group of 30 plus a 15-event tail, not `floor(45/20) = 2`.
+* The recorded `nSlots` in `metaConfig` is useful documentation but is *not* a
+  compatibility check: `hadd` takes histogram titles from the first input only,
+  so it describes just one job. The real witness is `slots/params`, whose two
+  bins accumulate the job count and the sum of the per-job `nSlots`; `hadd` sums
+  them, so the mean `bin2/bin1` must equal `GetNbinsX()` of `slots/nEv` or the
+  jobs disagreed. This was added after measuring that `hadd` merges histograms
+  of differing binning with `rc=0` and **no warning whatsoever** (a 1250-bin and
+  a 1000-bin `TH1F` came back as 1250-bin with bin contents summed), and that a
+  mismatched campaign still satisfies `sum(slots/nEv) == mEventSelected[accepted]`
+  - the totals survive even though the bucket assignment does not.
 * The eta-phi lattices are cleared lazily at the start of an event: only the
   pT bins that saw tracks in the previous event are `Reset()`, which is
   equivalent to clearing all of them but avoids zeroing ~5 MB of bins per event.

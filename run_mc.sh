@@ -3,7 +3,9 @@
 # AO2D listed in data/545312/file.list.
 #
 # Usage:  ./run_mc.sh [AO2D file ...]      (default: all files from file.list)
-# Output: results/<AO2D_NAME>/AnalysisResults.root + run.log
+# Output: $RESULTS_DIR/<AO2D_NAME>/AnalysisResults.root + run.log
+#         RESULTS_DIR defaults to "results"; export RESULTS_DIR=results_v2 to keep
+#         the new slot-based output separate from the existing baseline.
 #
 # Notes:
 #  * --configuration must be given to every device (single JSON, all devices).
@@ -17,6 +19,7 @@ source ./enable >/dev/null 2>&1
 export ALICEO2_CCDB_NOTOKENCHECK=1
 
 JSON="--configuration json://$PWD/mc_chain_config.json"
+OUTDIR=${RESULTS_DIR:-results}
 # default DPL shm segment is far too small for the MC tables (McParticles
 # message ~55 MB) -> give every device the same, large segment.
 SHM="--shm-segment-size 8589934592"   # 8 GiB, the option is in BYTES
@@ -30,7 +33,7 @@ fi
 for f in "${FILES[@]}"; do
   f=$(readlink -f "$f")
   tag=$(basename "$f" .root)
-  out="results/$tag"
+  out="$OUTDIR/$tag"
   mkdir -p "$out"
   AOD="--aod-file $f"
   echo "=== $tag -> $out ==="

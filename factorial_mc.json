@@ -52,6 +52,7 @@
         "includeTPCTracks": "false",
         "includeITSTracks": "false",
         "sampleSize": "3",
+        "nSlots": "1250",
         "useMC": "true",
         "useGlobalTrack": "false",
         "minITSClusters": "6",
