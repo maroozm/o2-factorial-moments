@@ -106,6 +106,7 @@ Main task options:
 | `dcaXY`, `dcaZ` | 0.1, 1.0 | echoed into `metaConfig` only, **not applied** (see note) |
 | `useMC` | false | echoed into `metaConfig`; MC handling follows the process switches |
 | `smearPhi` | false | randomise track phi (Gaussian, sigma=2pi) before filling the eta-phi lattices (the shipped JSONs set it to `true`) |
+| `flushTailSample` | true | flush a partial group of events as an extra subsample at end of stream (recorded in `metaConfig` as `flushTail=`) |
 
 Note on DCA: the cut that is actually applied to reconstructed tracks is the
 hard-coded ITS parameterisation `|dca_xy| < 0.0105 + 0.035 / pT^1.1`
@@ -215,7 +216,8 @@ Written by device `factorial-moments-task`, directory `factorial-moments-task`,
 * `mFinalFq{q}_bin{N}`, `mFinalFq{q}Sampled_bin{N}`, `mFinalAvBin*` - filled with
   `Fill(iM, value)` and never reset, so `hadd` adds them. Value =
   `content / (GetEntries()/52)`, where `GetEntries()/52` = number of samples
-  (sampleSize=3 events each) = 6+8+8+7 = 29 for the four AO2Ds.
+  (sampleSize=3 events each, plus one tail flush per AO2D) = 7+8+8+7 = 30 for
+  the four AO2Ds.
 * `mFqSum{q}_bin{N}` / `mFqSq{q}_bin{N}` (`TH1D`) - sum and sum of squares of the
   same per-sample Fq. Merge-safe, so the mean **and its error** can be rebuilt
   after `hadd` of any number of jobs:
@@ -238,6 +240,9 @@ Written by device `factorial-moments-task`, directory `factorial-moments-task`,
   border/pileup/ITS/z-vertex bits, `centrality`, `accepted`). `processRun3`
   fills the border and `kIsGoodITSLayersAll` steps, `processMCRec` fills
   `kIsVertexITSTPC` instead; steps a mode never applies stay empty.
+* `mSubsampleEvents` - one entry per flushed subsample, x = number of events in
+  the group (bin `sampleSize` = complete groups, smaller bins = end-of-stream
+  tail flushes).
 
 ## 7. metaConfig
 
@@ -246,7 +251,7 @@ effective configuration of the job (no `;` in it, otherwise ROOT would split the
 string into axis titles):
 
 ```
-FMtask centLimits=0,5 numPt=3 centralEta=0.9 sampleSize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
+FMtask centLimits=0,5 numPt=3 centralEta=0.9 sampleSize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 flushTail=1 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
 ```
 
 Histogram titles are not summed by `hadd`, so the merged file keeps this string.
@@ -270,6 +275,22 @@ is recommended once after upgrading the task.
   `smearPhi` option (default `false`, recorded in `metaConfig`); the shipped
   JSON files set it to `true` and the validated `.dat` files were produced with
   it on.
+* With `flushTailSample` (default `true`, recorded in `metaConfig` as
+  `flushTail=`), any partial group left at the end of a file
+  (`countSamples < sampleSize`) is flushed as one extra subsample of
+  `countSamples` events, instead of being silently dropped. The flush runs
+  inside the framework's end-of-stream hook: a `Service<FlushTailService>`
+  element declared **before** `histos` in the task gets its
+  `endOfStream()` called before the histogram registry is snapshotted, and it
+  calls back into the task (`mSubsampleEvents` records the group size of every
+  flush).
+  Subsamples are pooled **unweighted** (each sample counts once, as always), so
+  a 1-event tail carries the same weight as a complete `sampleSize`-event group
+  and its Fq is only resolvable down to one-event statistics - structural zeros
+  at high q / large M shift the merged mean by at most ~3 % (measured worst
+  case) and inflate the error modestly. Set `flushTailSample: false` to restore
+  the old drop-the-tail behaviour; a killed job never reaches the callback, so
+  its tail is lost regardless.
 * The eta-phi lattices are cleared lazily at the start of an event: only the
   pT bins that saw tracks in the previous event are `Reset()`, which is
   equivalent to clearing all of them but avoids zeroing ~5 MB of bins per event.

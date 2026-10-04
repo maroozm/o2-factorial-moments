@@ -22,6 +22,7 @@
         "applyCheckPtForRec": "true",
         "applyCheckPtForMC": "false",
         "smearPhi": "true",
+        "flushTailSample": "true",
         "evSelNoITSROFrameBorder": "true",
         "evSelNoTimeFrameBorder": "true",
         "centralEta": "0.899999976",

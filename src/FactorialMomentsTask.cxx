@@ -49,13 +49,27 @@
 using namespace o2;
 using namespace o2::framework;
 using namespace o2::framework::expressions;
+struct FactorialMomentsTask;
+
+struct FlushTailService {
+  static FlushTailService& instance()
+  {
+    static FlushTailService svc;
+    return svc;
+  }
+  void endOfStream();
+  FactorialMomentsTask* task = nullptr;
+};
+
 struct FactorialMomentsTask {
+  Service<FlushTailService> flushTailService;
   Configurable<bool> useITS{"useITS", false, "Select tracks with ITS"};
   Configurable<bool> useTPC{"useTPC", false, "Select tracks with TPC"};
   Configurable<bool> useGlobal{"useGlobal", true, "Select global tracks"};
   Configurable<bool> applyCheckPtForRec{"applyCheckPtForRec", false, "Apply checkpT for reconstructed tracks"};
   Configurable<bool> applyCheckPtForMC{"applyCheckPtForMC", true, "Apply checkpT for MC-generated tracks"};
   Configurable<bool> smearPhi{"smearPhi", false, "Randomise track phi with a Gaussian of sigma=2pi before filling the eta-phi lattices"};
+  Configurable<bool> flushTailSample{"flushTailSample", true, "Flush a partial group of events as an extra subsample at end of stream"};
   Configurable<bool> evSelNoITSROFrameBorder{"evSelNoITSROFrameBorder", true, "ITSROFrame border event selection cut"};
   Configurable<bool> evSelNoTimeFrameBorder{"evSelNoTimeFrameBorder", true, "TimeFrame border event selection cut"};
   Configurable<float> centralEta{"centralEta", 0.9, "eta limit for tracks"};
@@ -171,6 +185,7 @@ struct FactorialMomentsTask {
 
   void init(o2::framework::InitContext&)
   {
+    FlushTailService::instance().task = this;
     if (numPt.value < 1 || numPt.value > 5) {
       LOG(fatal) << "numPt must be between 1 and 5, got " << numPt.value;
     }
@@ -187,9 +202,9 @@ struct FactorialMomentsTask {
     if (applyCheckPtForRec.value == applyCheckPtForMC.value) {
       LOG(fatal) << "exactly one of applyCheckPtForRec / applyCheckPtForMC must be enabled";
     }
-    TString cfg = Form("FMtask centLimits=%d,%d numPt=%d centralEta=%g sampleSize=%d ptMin=%g dcaXY=%g dcaZ=%g useMC=%d nfqOrder=%d smearPhi=%d",
+    TString cfg = Form("FMtask centLimits=%d,%d numPt=%d centralEta=%g sampleSize=%d ptMin=%g dcaXY=%g dcaZ=%g useMC=%d nfqOrder=%d smearPhi=%d flushTail=%d",
                        centLimits.value[0], centLimits.value[1], numPt.value, centralEta.value,
-                       sampleSize.value, ptMin.value, dcaXY.value, dcaZ.value, useMC.value ? 1 : 0, nfqOrder, smearPhi.value ? 1 : 0);
+                       sampleSize.value, ptMin.value, dcaXY.value, dcaZ.value, useMC.value ? 1 : 0, nfqOrder, smearPhi.value ? 1 : 0, flushTailSample.value ? 1 : 0);
     cfg += Form(" vertexXYZ=%g,%g,%g", vertexXYZ.value[0], vertexXYZ.value[1], vertexXYZ.value[2]);
     cfg += " ptCuts=";
     for (int i = 0; i < static_cast<int>(ptCuts.value.size()); i++) {
@@ -201,6 +216,7 @@ struct FactorialMomentsTask {
     for (int iStep = 0; iStep < kNEventSteps; ++iStep) {
       mEventSelected->GetXaxis()->SetBinLabel(iStep + 1, evLabels[iStep]);
     }
+    histos.add("mSubsampleEvents", "events per flushed subsample;events;subsamples", HistType::kTH1F, {{sampleSize.value, 0.5, sampleSize.value + 0.5}});
     for (int iM = 0; iM < nBins; ++iM) {
       binningM[iM] = 2 * (iM + 2);
     }
@@ -256,14 +272,49 @@ struct FactorialMomentsTask {
       }
     }
   }
+  void flushTailIfNeeded()
+  {
+    if (!flushTailSample || countSamples <= 0) {
+      return;
+    }
+    flushSample(countSamples);
+    countSamples = 0;
+  }
+  void flushSample(const int nGroup)
+  {
+    histos.fill(HIST("mSubsampleEvents"), nGroup);
+    for (int iPt = 0; iPt < numPt; ++iPt) {
+      for (int iM = 0; iM < nBins; ++iM) {
+        const double avM = binConSampled[iPt][iM] / nGroup;
+        for (int iq = 0; iq < nfqOrder; ++iq) {
+          mBinConFinalSampled[iPt * nfqOrder + iq]->Fill(iM, avM);
+          const double den = std::pow(avM, iq + 2);
+          const double fqM = fqEventSampled[iq][iPt][iM] / nGroup;
+          const double tmp = (den > 0.) ? fqM / den : 0.;
+          mFqBinFinalSampled[iPt * nfqOrder + iq]->Fill(iM, tmp);
+          mFqSum[iPt * nfqOrder + iq]->Fill(iM, tmp);
+          mFqSq[iPt * nfqOrder + iq]->Fill(iM, tmp * tmp);
+          ++nSubsamples[iq][iPt][iM];
+          const int nThisJob = nSubsamples[iq][iPt][iM];
+          double stdErr = 0.;
+          if (nThisJob > 1) {
+            const double sumThis = mFqSum[iPt * nfqOrder + iq]->GetBinContent(iM + 1);
+            const double sumSqThis = mFqSq[iPt * nfqOrder + iq]->GetBinContent(iM + 1);
+            const double meanThis = sumThis / nThisJob;
+            const double varThis = (sumSqThis - nThisJob * meanThis * meanThis) / (nThisJob - 1);
+            if (varThis > 0.)
+              stdErr = std::sqrt(varThis / nThisJob);
+          }
+          mFqError[iPt * nfqOrder + iq]->SetBinContent(iM + 1, stdErr);
+          fqEventSampled[iq][iPt][iM] = 0;
+        }
+        binConSampled[iPt][iM] = 0;
+      }
+    }
+  }
   void calculateMoments(const std::vector<std::shared_ptr<TH2>>& hist)
   {
     countSamples++;
-    bool compSample = kFALSE;
-    if (countSamples == sampleSize) {
-      compSample = kTRUE;
-      countSamples = 0;
-    }
     // Calculate the normalized factorial moments
     for (int iPt = 0; iPt < numPt; ++iPt) {
       for (int iM = 0; iM < nBins; ++iM) {
@@ -296,36 +347,12 @@ struct FactorialMomentsTask {
           fqEventSampled[iq][iPt][iM] += fqEvent[iq][iPt][iM];
           mFqBinFinal[iPt * nfqOrder + iq]->Fill(iM, fqEvent[iq][iPt][iM]);
           mBinConFinal[iPt * nfqOrder + iq]->Fill(iM, binConEvent[iPt][iM]);
-          if (compSample) {
-            const double avM = binConSampled[iPt][iM] / sampleSize;
-            mBinConFinalSampled[iPt * nfqOrder + iq]->Fill(iM, avM);
-            const double den = std::pow(avM, iq + 2);
-            const double fqM = ((fqEventSampled[iq][iPt][iM]) / sampleSize);
-
-            const double tmp = (den > 0.) ? fqM / den : 0.;
-            mFqBinFinalSampled[iPt * nfqOrder + iq]->Fill(iM, tmp);
-            mFqSum[iPt * nfqOrder + iq]->Fill(iM, tmp);
-            mFqSq[iPt * nfqOrder + iq]->Fill(iM, tmp * tmp);
-
-            ++nSubsamples[iq][iPt][iM];
-            const int nThisJob = nSubsamples[iq][iPt][iM];
-            double stdErr = 0.;
-            if (nThisJob > 1) {
-              const double sumThis = mFqSum[iPt * nfqOrder + iq]->GetBinContent(iM + 1);
-              const double sumSqThis = mFqSq[iPt * nfqOrder + iq]->GetBinContent(iM + 1);
-              const double meanThis = sumThis / nThisJob;
-              const double varThis = (sumSqThis - nThisJob * meanThis * meanThis) / (nThisJob - 1);
-              if (varThis > 0.)
-                stdErr = std::sqrt(varThis / nThisJob);
-            }
-            mFqError[iPt * nfqOrder + iq]->SetBinContent(iM + 1, stdErr);
-            fqEventSampled[iq][iPt][iM] = 0;
-          }
-        }
-        if (compSample) {
-          binConSampled[iPt][iM] = 0;
         }
       }
+    }
+    if (countSamples == sampleSize) {
+      flushSample(sampleSize);
+      countSamples = 0;
     }
   }
 
@@ -613,6 +640,14 @@ struct FactorialMomentsTask {
   }
   PROCESS_SWITCH(FactorialMomentsTask, processRun2, "for RUN2", false);
 };
+
+inline void FlushTailService::endOfStream()
+{
+  if (task != nullptr) {
+    task->flushTailIfNeeded();
+  }
+}
+
 WorkflowSpec defineDataProcessing(ConfigContext const& cfgc)
 {
   return WorkflowSpec{
