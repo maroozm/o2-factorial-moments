@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="O2 CVMFS — Factorial Moments" width="360">
+</p>
+
 # Factorial Moments (ALICE O2Physics)
 
 O2Physics task for the **normalized factorial moments** analysis of particle
