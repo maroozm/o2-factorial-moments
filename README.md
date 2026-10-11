@@ -42,8 +42,9 @@ produce `F_q` results from AO2Ds on CVMFS.
 | `build_cmd` | cmake + make + install wrapper |
 | `run_mc.sh` | run the full chain on every AO2D of a file list |
 | `mc_chain_config.json`, `factorial_mc.json` | task + chain configuration |
-| `checkFMo2.C` | draw `ln(F_q)` vs `ln(M^2)` and dump `.dat` files |
-| `validateFMo2.C` | independent cross-check of those `.dat` files |
+| `slotpool.C` | pool slots into `K`-event subsamples after `hadd`; writes `.dat` + CSV |
+| `plotFqvsM.C` | draw `F_q` vs `M^2` straight from the slotpool CSV |
+| `findK.C` | scan candidate `K` values (group count, tail, overshoot) for a merged file |
 | `cvmfs/` | run the chain inside a CVMFS singularity container |
 | `data/545312/file.list` | AO2D input list (the `.root` files are **not** in git) |
 | `results/` | run outputs (not in git) |
@@ -191,64 +192,50 @@ On machines without a CVMFS mount, see `cvmfs/`:
 * `cvmfs/cvmfs_cmd` - runs the script above inside the container
 * `cvmfs/cvmfs2go` - the container/`cvmfs2go` helper
 
-## 5. Merging and plotting
+## 5. Merging, pooling and plotting
 
 ```
 mkdir -p results/merged
 hadd -f results/merged/AnalysisResults.root results/AO2D_*/AnalysisResults.root
-root -l -q -e '.x checkFMo2.C+("results/merged/AnalysisResults.root", "./results")'
+root -l -b -q 'slotpool.C+("results/merged/AnalysisResults.root", 17, "results/merged/AnalysisResults.root", "slotpool_K17.csv")'
+root -l -b -q 'plotFqvsM.C+("slotpool_K17.csv")'
 ```
 
-`checkFMo2.C(<rootfile>, <outdir>)` needs nothing but the root file (the output
-directory defaults to `./results` and is created when missing) and detects
-everything else from the file itself, then draws **every** pT bin it finds:
+Everything after the merge is post-processing of the merged
+`AnalysisResults.root` (Hyperloop delivers exactly **one** merged file and
+`hadd` cannot split anything back apart, so subsamples of a chosen size `K`
+must be reconstructable from the merge-safe slot output, see below):
 
-| what | where it comes from |
-|---|---|
-| number of pT bins | existing `mFinalFq2Sampled_bin<N>`, `N = 1, 2, ...` |
-| pT ranges | `metaConfig` (`ptCuts=`), else the histogram titles |
-| number of M bins | `GetNbinsX()` of `mFinalFq2Sampled_bin1` |
-| M values | `GetNbinsX()` of `bin1/Reset/mEtaPhi<i>` (= `binningM[iM]`) |
-| Fq orders | existing `mFinalFq<q>Sampled_bin1`, `q = 2, 3, ...` |
-| centrality range | `metaConfig` (`centLimits=`), else the filled range of `mCentFT0C`, `mCentFT0M`, `mCentFV0A`, `mCentFT0A` |
-| eta / z-vertex cuts | `metaConfig` (`centralEta=`, `vertexXYZ=`), else the filled range of `mEta` / `mVertexZ` |
-| number of samples | `GetEntries() / (number of M bins)` |
-| error bars | `mFqSum`/`mFqSq` when present, else `mFqError` (single job only) |
+* `slotpool.C(<file>, <K>, <baseline>, <csv>, <keepTail>, <datDir>)` pools the
+  slots into `K`-event subsamples and writes the pooled `F_q` - values only,
+  nothing of the old path is ever written to a file: `FactorialMoments_bin<N>.dat`
+  into `datDir` (default `dat_slots/`) in the established layout, and a CSV
+  when `csv` is given (`""` = no CSV). With a `baseline` file it additionally
+  prints a console sanity table against the old `sampleSize` path; the merged
+  file itself serves as baseline, since the old-path objects live in it too.
+* `plotFqvsM.C(<csv>, <ptSel>, <logMode>, <ymin>, <ymax>, <outDir>)` draws
+  `F_q` vs `M^2` directly from that CSV (it never reads a `.dat`): one PDF per
+  pT bin with every order as a marker+band series, established ATLAS style -
+  details below.
+* `findK.C(<file>, <kMin>, <kMax>, <csv>)` scans candidate `K` values so the
+  subsample size can be chosen from the data - details below.
 
-For every bin it writes `<outdir>/FactorialMoments_bin<N>.dat` and `.pdf`.
-All header lines of the `.dat` start with `#` (source file, pT range,
-centrality, subsamples, eta, z-vertex, column names), followed by the columns
-`M2 lnM2 lnF2 errF2 ... lnF<qmax> errF<qmax>` - one pair per order found in the
-file (`q = 2..7` here), where `err` = `sigma(Fq)/mean(Fq)` = the error on
-`ln(Fq)`; points with `Fq <= 0` are written as `-999 -999`.
-
-`validateFMo2.C(<outdir>)` (default `./results`) cross-checks those `.dat`
-files against an independent pooled recomputation from the per-file
-results (expected agreement: ~1e-7 on the value, ~1e-5 on the error, i.e. the
-float storage level):
-
-```
-root -l -q -e '.x validateFMo2.C+("./results")'
-```
+The CSV starts with a `#` header block (source path, date, K/keepTail/
+subsamples, slot and event counts, centrality, eta and vertex cuts, pT bin
+ranges - enough to label a figure without anything else), followed by the
+columns `pt,q,M,nGroups,meanNew,errNew`: the pooled mean of `F_q` and its
+error over the `nGroups` pooled groups, absolute (not on `ln(F_q)`). The
+`.dat` carries the same pooled values as `lnF` + relative error
+(`err = sigma(Fq)/mean(Fq)`, i.e. the error on `ln(Fq)`), with `M2` from the
+lattice and points `Fq <= 0` written as `-999 -999`, so a pooled `.dat` can be
+diffed against any reference in the same layout.
 
 ### Subsamples after `hadd` (`slotpool.C`)
 
-Hyperloop delivers exactly **one** merged `AnalysisResults.root`, and `hadd`
-cannot split anything back apart - so if subsamples of a chosen size `K` have to
-exist *after* the merge, they must be reconstructable from a merge-safe
-representation. Besides the old `sampleSize` path the task therefore fills a
-second set of histograms (`slots/...`, see the output section) in which every
-event is binned into a hash bucket. Pooling is then a post-processing step:
-
-```
-mkdir -p results/merged
-hadd -f results/merged/AnalysisResults.root results/AO2D_*/AnalysisResults.root
-root -l -b -q 'slotpool.C+("results/merged/AnalysisResults.root", 20, "results/merged/AnalysisResults.root")'
-```
-
-`slotpool.C(<file>, <K>, <baseline>, <csv>, <keepTail>)` - `csv` and `keepTail`
-are optional (`csv` defaults to `slotpool.csv`, `keepTail` to `0`; pass `""` for
-`baseline` to skip the old-path comparison). It pools consecutive **non-empty**
+Besides the old `sampleSize` path the task therefore fills a second set of
+histograms (`slots/...`, see the output section) in which every event is binned
+into a hash bucket. `slotpool.C` turns that into subsamples of any `K` by
+post-processing alone: it pools consecutive **non-empty**
 slots greedily in index order until the accumulated event count reaches `K`, and
 recomputes for every pT bin, order and M bin
 
@@ -327,6 +314,48 @@ multiplicity bins at high `q` scatter, because a group that happens to contain
 none of the rare events records a structural zero. That scatter is the
 statistical resolution of the method, not a discrepancy - it is exactly the
 error bar the method reports.
+
+### Plotting (`plotFqvsM.C`)
+
+`plotFqvsM.C(<csv>, <ptSel>, <logMode>, <ymin>, <ymax>, <outDir>)` draws the
+pooled result straight from the slotpool CSV (it never reads a `.dat`):
+
+* **One PDF per pT bin**, `FactorialMoments_bin<N>.pdf`, with every order
+  found in the CSV (`q = 2..7`) drawn as its own series: the per-order
+  colours/markers and translucent error bands of the established ATLAS style,
+  the cuts in the header (`|eta|`, `|v_z|`, centrality, pT range - all parsed
+  from the CSV's `#` header block) and a legend of orders above the curves.
+* `x = M^2` is rebuilt from the CSV's `M` index through the lattice
+  `bin1/Reset/mEtaPhi<i>` of the root file named in the CSV's `# source` line;
+  if that file is not reachable the lattice falls back to `2*(i+2)` - the M
+  binning of this analysis, see above - with a warning.
+* `ptSel` = `"all"` (default) or a comma list like `"1,3"`. `logMode` = `0`
+  automatic (log y as soon as q = 6 or 7 are present, i.e. the combined range
+  spans decades), `1` force linear, `2` force log. `ymin`/`ymax` <= 0 choose
+  the range automatically (established ±18 % margins); a positive value pins
+  that edge. `outDir` defaults to `<csv dir>/plots_FqvsM`.
+
+### Choosing `K` (`findK.C`)
+
+`findK.C(<file>, <kMin>, <kMax>, <csv>)` (defaults `kMin = 5`, `kMax = 200`;
+`csv = ""` means no CSV dump) scans candidate `K` values with the exact
+`poolSlots()` walk `slotpool.C` uses, so every number it prints is what a real
+run at that `K` would produce. Per `K` it reports the groups formed, the
+events left in the tail and the worst group-size overshoot (the
+indivisible-slot effect), ranks candidates by `score = overshoot% + tail%` and
+lists the Pareto options - the `K` for which no other candidate has both less
+overshoot and less tail. That table is how `K` was chosen for the campaign
+(e.g. `K = 17`: 438 groups, mean size 17.2, 0 events in the tail).
+
+**Provenance.** The full validation record of this workflow - exactness tests,
+the post-`hadd` campaign comparison, the `K` scan and all figures - is issue
+[#1](https://github.com/maroozm/o2-factorial-moments/issues/1). The validation
+scripts of that campaign (`checkFMo2.C`, `validateFMo2.C`, `plotdat.C`,
+`plotratio.C`, `scancampaign.sh`, `makeplots_scan.sh`, `verify_ab.sh`, ...) are
+archived there as `validation_scripts.zip` and in
+`../removed_validation_backup_20261010.tar.gz`; the campaign output data is in
+`../validation_data_removed_20261010.tar.gz`. The repository state at the end
+of the campaign is preserved as the branch `11/10/2026`.
 
 ## 6. Output histograms and merging
 
@@ -410,8 +439,11 @@ is recommended once after upgrading the task.
 
 * The `M` binning is `binningM[iM] = 2 * (iM + 2)`, i.e. M = 4, 6, ..., 106
   (52 bins). Every sample fills every one of the 52 bins exactly once, so
-  `nSamples = GetEntries() / 52`. `checkFMo2.C` reads the same M values back
-  from the `bin<N>/Reset/mEtaPhi<i>` binning instead of hardcoding them.
+  `nSamples = GetEntries() / 52`. `slotpool.C` (`.dat` writer) and
+  `plotFqvsM.C` read the same M values back from the
+  `bin1/Reset/mEtaPhi<i>` binning instead of hardcoding them; when
+  `plotFqvsM.C` cannot reach the source root it falls back to `2*(i+2)`,
+  which is exactly this binning.
 * The factorial numerator uses the falling factorial
   `n!/(n-q)! = n*(n-1)*...*(n-q+1)` evaluated with an explicit product loop:
   `TMath::Factorial` overflows to `inf` for n >= 171.
