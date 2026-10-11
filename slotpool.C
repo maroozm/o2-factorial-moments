@@ -3,14 +3,12 @@
 //   root -l -b -q 'slotpool.C+("results_v2/merged/AnalysisResults.root", 20)'
 //
 // Arguments: file, K (target events per subsample; <= 0 pools everything into
-// one group), baseline file ("" to skip the old-path comparison -- console
-// sanity table only, nothing old is ever written to a file), csv path ("" =
-// no CSV; otherwise the NEW-path columns  pt,q,M,nGroups,meanNew,errNew
-// behind a '#' header block), keepTail (1 = retain the trailing partial
-// group, 0 = drop it so every subsample really has >= K events), datDir
-// (default "dat_slots": write FactorialMoments_bin*.dat there in checkFMo2.C's
-// exact layout -- new-path values only -- so the pooled result can be diffed
-// against a reference .dat with compare_dat.py; "" = skip).
+// one group), csv path ("" = no CSV; otherwise the pooled columns
+// pt,q,M,nGroups,meanNew,errNew behind a '#' header block), keepTail (1 =
+// retain the trailing partial group, 0 = drop it so every subsample really has
+// >= K events), datDir (default "dat_slots": write FactorialMoments_bin*.dat
+// there in the checkFMo2.C layout -- new-path values only, diffable against a
+// reference .dat; "" = skip).
 //
 // Input objects written by FactorialMomentsTask (under the
 // factorial-moments-task/ directory O2 creates for the device):
@@ -22,20 +20,12 @@
 // so every subsample has >= K events and the bucket granularity (nSlots) never
 // has to be known here. Empty slots are skipped, a trailing partial group is
 // dropped. For a pooled group S, with Q the order suffix of the object
-// (Q = 2..7, i.e. the exponent is iq+2 exactly as in flushSample):
+// (Q = 2..7, i.e. the exponent is iq+2 exactly as in the task):
 //
 //   Fq = (Sfq / n) / (Socc / n)^Q,   n = sum of nEv over S
 //
-// This is the same expression flushSample() uses on the old path. The sums are
-// accumulated in a different order (per slot, then pooled), so agreement with
-// the old path is expected at roundoff level rather than bit-for-bit.
-//
 // K <= 0 pools every non-empty slot into ONE group, which reproduces the whole
 // event set; against a single-subsample reference that is an exactness test.
-//
-// With a baseline given, the old mFqSum/mFqSq/mSubsampleEvents statistics are
-// recomputed from their merged sums (mFqError is per-job and does not survive
-// hadd) and printed alongside.
 
 #include "TDatime.h"
 #include "TDirectory.h"
@@ -88,7 +78,7 @@ TDirectory* taskDir(TFile* f)
   while (auto* k = (TKey*)next()) {
     if (std::string(k->GetClassName()).find("TDirectory") == std::string::npos) continue;
     auto* d = dynamic_cast<TDirectory*>(f->Get(k->GetName()));
-    if (d && (d->Get("slots/nEv") || d->Get("mSubsampleEvents"))) return d;
+    if (d && d->Get("slots/nEv")) return d;
   }
   return nullptr;
 }
@@ -153,9 +143,7 @@ const Cell* findCell(const PtCells& c, int p, int m, int q)
   return &iq->second;
 }
 
-// Lattice size per M index, read exactly the way checkFMo2.C's detectSetup()
-// does it: the cell count of bin1/Reset/mEtaPhi{i}, falling back to 2*(i+2).
-// Anything else and the first column would not line up with the reference .dat.
+// lattice size per M index: cell count of bin1/Reset/mEtaPhi{i}, fallback 2*(i+2)
 std::vector<int> latticeM(TDirectory* td, int nM)
 {
   std::vector<int> mv;
@@ -167,12 +155,10 @@ std::vector<int> latticeM(TDirectory* td, int nM)
   return mv;
 }
 
-// Reproduce checkFMo2.C's processBin() byte layout, substituting the
-// slot-pooled statistics for the old-path mFqSum/mFqSq ones, so the resulting
-// FactorialMoments_bin*.dat can be diffed directly against the reference.
+// .dat byte layout follows checkFMo2.C's processBin() (archived with the
+// validation campaign), with the slot-pooled statistics
 
-// Read one space-delimited value out of the metaConfig histogram title, the
-// same way checkFMo2.C's configValue() does.
+// read one space-delimited value out of the metaConfig histogram title
 static std::string metaValue(TDirectory* td, const char* key)
 {
   auto* meta = dynamic_cast<TH1*>(td->Get("metaConfig"));
@@ -301,7 +287,6 @@ void writeDat(const std::string& path, const char* src, const PtCells& cells,
 
 void slotpool(const char* fileName,
               int K = 20,
-              const char* baselineFile = "",
               const char* csvFile = "",
               int keepTail = 0,
               const char* datDir = "dat_slots")
@@ -353,8 +338,6 @@ void slotpool(const char* fileName,
            accepted, pooled + dropped,
            accepted == pooled + dropped ? "[OK]" : "[!! MISMATCH]");
   }
-  auto* subs = dynamic_cast<TH1*>(td->Get("mSubsampleEvents"));
-  if (subs) printf("  old-path subsamples : %d\n", static_cast<int>(subs->GetEntries()));
   if (groups.empty()) { printf("no complete subsample -- lower K or raise nSlots\n"); return; }
 
   // discover numPt / nfqOrder from what is actually present
@@ -367,27 +350,11 @@ void slotpool(const char* fileName,
   printf("  pt bins found       : %zu, orders found: %zu\n\n", ptBins.size(), orders.size());
   if (ptBins.empty() || orders.empty()) return;
 
-  // ---- optional baseline ----
-  TFile* fb = nullptr;
-  TDirectory* tdb = nullptr;
-  int nOld = 0;
-  if (baselineFile && baselineFile[0]) {
-    fb = TFile::Open(baselineFile, "READ");
-    if (!fb || fb->IsZombie()) { printf("cannot open baseline %s\n", baselineFile); fb = nullptr; }
-    else {
-      tdb = taskDir(fb);
-      auto* se = tdb ? dynamic_cast<TH1*>(tdb->Get("mSubsampleEvents")) : nullptr;
-      if (se) nOld = static_cast<int>(se->GetEntries());
-      printf("=== baseline ===\n  %s\n  old subsamples: %d\n\n", baselineFile, nOld);
-    }
-  }
-
   FILE* csv = nullptr;
   if (csvFile && csvFile[0]) {
     csv = fopen(csvFile, "w");
     if (csv) {
-      // '#' header block: skipped by plotdat.C / plotratio.C (they ignore lines
-      // starting with '#'), so the CSV is self-describing without breaking them.
+      // '#' header block: self-describing provenance, ignored by '#'-skipping readers
       TString full = gSystem->ExpandPathName(fileName);
       if (!full.BeginsWith("/")) full = TString(gSystem->pwd()) + "/" + full;
       fprintf(csv, "# source : %s\n", full.Data());
@@ -421,13 +388,10 @@ void slotpool(const char* fileName,
     }
   }
 
-  printf("=== Fq (new slots vs old) ===\n");
-  printf("%3s %3s %3s | %10s %10s %-20s | %10s %10s\n",
-         "pt", "q", "M", "meanNew", "errNew", "ratio new/old", "meanOld", "errOld");
+  printf("=== Fq (slot-pooled) ===\n");
+  printf("%3s %3s %3s | %10s %10s %6s\n",
+         "pt", "q", "M", "meanNew", "errNew", "nGroups");
 
-  double worstRel = 0;
-  int worstQ = -1, worstPt = -1, worstM = -1;
-  double worstNew = 0, worstOld = 0;
   PtCells cells; // pooled statistics, buffered so the .dat can be written in M order
 
   for (int p : ptBins) {
@@ -436,9 +400,6 @@ void slotpool(const char* fileName,
     for (int q : orders) {
       auto* fq = get2(td, Form("slots/sumFq_pt%d_o%d", p, q));
       if (!fq) continue;
-
-      auto* oldSum = (tdb && fb) ? dynamic_cast<TH1*>(tdb->Get(Form("mFqSum%d_bin%d", q, p))) : nullptr;
-      auto* oldSq = (tdb && fb) ? dynamic_cast<TH1*>(tdb->Get(Form("mFqSq%d_bin%d", q, p))) : nullptr;
 
       for (int m = 0; m < fq->GetNbinsY(); ++m) { // M index, matches nBins
         std::vector<double> vals;
@@ -459,35 +420,13 @@ void slotpool(const char* fileName,
 
         { Cell c; c.mean = sn.mean; c.err = sn.err; cells[p][m][q] = c; }
 
-        Stat so;
-        if (oldSum && oldSq && nOld > 1) {
-          const double s = oldSum->GetBinContent(m + 1);
-          const double s2 = oldSq->GetBinContent(m + 1);
-          so.n = nOld;
-          so.mean = s / nOld;
-          const double var = (s2 - nOld * so.mean * so.mean) / (nOld - 1);
-          if (var > 0) so.err = std::sqrt(var / nOld);
-        } else if (oldSum && nOld == 1) {
-          so.n = 1;
-          so.mean = oldSum->GetBinContent(m + 1); // single subsample: no spread
-        }
-
         if (csv) {
           fprintf(csv, "%d,%d,%d,%d,%.10g,%.10g\n",
                   p, q, m + 1, sn.n, sn.mean, sn.err);
         }
         // only print a few M per (p,q) to keep the table readable
         if (m == 0 || m == fq->GetNbinsY() / 2 || m == fq->GetNbinsY() - 1) {
-          printf("%3d %3d %3d | %10.5f %10.5f ", p, q, m + 1, sn.mean, sn.err);
-          if (so.n > 0 && std::fabs(so.mean) > 0)
-            printf("%-20.4f ", sn.mean / so.mean);
-          else
-            printf("%-20s ", "-");
-          printf("| %10.5f %10.5f\n", so.mean, so.err);
-        }
-        if (so.n > 0 && std::fabs(so.mean) > 1e-12) {
-          const double rel = std::fabs(sn.mean / so.mean - 1.);
-          if (rel > worstRel) { worstRel = rel; worstQ = q; worstPt = p; worstM = m + 1; worstNew = sn.mean; worstOld = so.mean; }
+          printf("%3d %3d %3d | %10.5f %10.5f %6d\n", p, q, m + 1, sn.mean, sn.err, sn.n);
         }
       }
     }
@@ -502,10 +441,6 @@ void slotpool(const char* fileName,
       int nM = 0;
       if (auto* occY = dynamic_cast<TH2*>(td->Get(Form("slots/sumOcc_pt%d", p))))
         nM = occY->GetNbinsY();
-      // nBins must be the one checkFMo2.C reports, i.e. the X bins of
-      // mFinalFq2Sampled_bin{p}; the slot Y axis is only the fallback.
-      if (auto* hf = dynamic_cast<TH1*>(td->Get(Form("mFinalFq2Sampled_bin%d", p))))
-        nM = hf->GetNbinsX();
       if (nM <= 0) { printf("  !! pt bin %d: cannot determine M bins\n", p); continue; }
       const std::vector<int> mv = latticeM(td, nM);
       const std::string path =
@@ -516,11 +451,5 @@ void slotpool(const char* fileName,
     }
   }
 
-  if (worstQ > 0) {
-    printf("\n=== worst relative difference ===\n");
-    printf("  pt=%d q=%d M=%d  new=%.6f  old=%.6f  rel=%.4g%%\n",
-           worstPt, worstQ, worstM, worstNew, worstOld, 100 * worstRel);
-  }
   f->Close();
-  if (fb && fb != f) fb->Close();
 }

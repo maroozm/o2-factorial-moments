@@ -104,14 +104,12 @@ Main task options:
 |---|---|---|
 | `numPt` | 5 | number of pT bins (must match `ptCuts`) |
 | `ptCuts` | `0.2, 2` | bin edges in GeV/c, `2*numPt` values |
-| `sampleSize` | 100 | events per subsample (defines `F_q` samples) |
 | `centLimits` | `0, 5` | accepted centrality range (FT0C, Run 3) |
 | `centralEta` | 0.9 | `|eta|` cut |
 | `vertexXYZ` | `0.3, 0.4, 10` | vertex x, y (cm) and z (cm) cuts |
 | `dcaXY`, `dcaZ` | 0.1, 1.0 | echoed into `metaConfig` only, **not applied** (see note) |
 | `useMC` | false | echoed into `metaConfig`; MC handling follows the process switches |
 | `smearPhi` | false | randomise track phi (Gaussian, sigma=2pi) before filling the eta-phi lattices (the shipped JSONs set it to `true`) |
-| `flushTailSample` | true | flush a partial group of events as an extra subsample at end of stream (recorded in `metaConfig` as `flushTail=`) |
 | `nSlots` | 1250 | hash buckets for merge-safe subsampling, `slot = splitmix64(globalBC) % nSlots` (recorded in `metaConfig` as `nSlots=`). **Must be identical in every job of a campaign**, see below |
 
 Note on DCA: the cut that is actually applied to reconstructed tracks is the
@@ -197,7 +195,7 @@ On machines without a CVMFS mount, see `cvmfs/`:
 ```
 mkdir -p results/merged
 hadd -f results/merged/AnalysisResults.root results/AO2D_*/AnalysisResults.root
-root -l -b -q 'slotpool.C+("results/merged/AnalysisResults.root", 17, "results/merged/AnalysisResults.root", "slotpool_K17.csv")'
+root -l -b -q 'slotpool.C+("results/merged/AnalysisResults.root", 17, "slotpool_K17.csv")'
 root -l -b -q 'plotFqvsM.C+("slotpool_K17.csv")'
 ```
 
@@ -206,13 +204,11 @@ Everything after the merge is post-processing of the merged
 `hadd` cannot split anything back apart, so subsamples of a chosen size `K`
 must be reconstructable from the merge-safe slot output, see below):
 
-* `slotpool.C(<file>, <K>, <baseline>, <csv>, <keepTail>, <datDir>)` pools the
-  slots into `K`-event subsamples and writes the pooled `F_q` - values only,
-  nothing of the old path is ever written to a file: `FactorialMoments_bin<N>.dat`
-  into `datDir` (default `dat_slots/`) in the established layout, and a CSV
-  when `csv` is given (`""` = no CSV). With a `baseline` file it additionally
-  prints a console sanity table against the old `sampleSize` path; the merged
-  file itself serves as baseline, since the old-path objects live in it too.
+* `slotpool.C(<file>, <K>, <csv>, <keepTail>, <datDir>)` pools the
+  slots into `K`-event subsamples and writes the pooled `F_q`: the pooled
+  values are printed to the console, `FactorialMoments_bin<N>.dat` goes into
+  `datDir` (default `dat_slots/`) in the established layout, and a CSV is
+  written when `csv` is given (`""` = no CSV).
 * `plotFqvsM.C(<csv>, <ptSel>, <logMode>, <ymin>, <ymax>, <outDir>)` draws
   `F_q` vs `M^2` directly from that CSV (it never reads a `.dat`): one PDF per
   pT bin with every order as a marker+band series, established ATLAS style -
@@ -232,22 +228,22 @@ diffed against any reference in the same layout.
 
 ### Subsamples after `hadd` (`slotpool.C`)
 
-Besides the old `sampleSize` path the task therefore fills a second set of
-histograms (`slots/...`, see the output section) in which every event is binned
-into a hash bucket. `slotpool.C` turns that into subsamples of any `K` by
-post-processing alone: it pools consecutive **non-empty**
-slots greedily in index order until the accumulated event count reaches `K`, and
-recomputes for every pT bin, order and M bin
+The task fills a second set of histograms (`slots/...`, see the output section)
+in which every event is binned into a hash bucket. `slotpool.C` turns that into
+subsamples of any `K` by post-processing alone: it pools consecutive
+**non-empty** slots greedily in index order until the accumulated event count
+reaches `K`, and recomputes for every pT bin, order and M bin
 
 ```
 Fq = (Sfq / n) / (Socc / n)^Q        n = sum of slots/nEv over the pooled set
 ```
 
-where `Q` is the object suffix `o{q}` (2..7), i.e. exactly the exponent
-`flushSample()` uses. The mean and its error are taken over the pooled groups;
-on the old side the statistics are rebuilt from the merged
-`mFqSum`/`mFqSq`/`mSubsampleEvents`, because `mFqError` is per-job and does not
-survive `hadd`.
+where `Q` is the object suffix `o{q}` (2..7), the same exponent the task uses
+per event. The mean and its error are taken over the pooled groups. For an
+independent cross-check the task still records the per-event quantities in
+`mFinalFq{q}_bin{N}` / `mFinalAvBin{q}_bin{N}` (see the output section):
+pooled over all events, `mean(mFinalFq) / mean(mFinalAv)^Q` must reproduce the
+`K = 0` single-group result.
 
 Properties worth knowing:
 
@@ -271,8 +267,8 @@ Properties worth knowing:
   input only, so `metaConfig` alone cannot detect this.
 * **Tail**: `K` may not divide the total exactly. With `keepTail=0` (default)
   the trailing partial group is dropped, so every subsample really holds
-  `>= K` events; with `keepTail=1` it is kept and may hold `< K`, mirroring
-  `flushTailSample`. The macro prints how many events each choice drops.
+  `>= K` events; with `keepTail=1` it is kept and may hold `< K`. The macro
+  prints how many events each choice drops.
 * **Invariant it asserts**: `mEventSelected[accepted]` must equal the total
   `slots/nEv`, printed as `[OK]`. Any mismatch means events were lost or
   double-counted between the two representations.
@@ -282,7 +278,10 @@ Properties worth knowing:
   `processMcRun2`/`processRun2` compile and take the same code path but have not
   been run.
 
-**Validation.**
+**Validation.** (Record of the validation campaign. The old-path histograms
+these comparisons were made against - `mFqSum`/`mFqSq`/`mSubsampleEvents` and
+the `*Sampled` set - have since been removed from the task; the numbers below
+stand as the campaign's record, not as reproducible steps.)
 
 1. *Exactness.* With `sampleSize` set high enough that the old path emits one
    subsample per job, old and new describe the same event set, and with `K = 0`
@@ -362,26 +361,12 @@ of the campaign is preserved as the branch `11/10/2026`.
 Written by device `factorial-moments-task`, directory `factorial-moments-task`,
 `q` = 2..7, `N` = pT bin (`bin1..bin3`), 52 M bins (M = 4, 6, ..., 106):
 
-* `mFinalFq{q}_bin{N}`, `mFinalFq{q}Sampled_bin{N}`, `mFinalAvBin*` - filled with
-  `Fill(iM, value)` and never reset, so `hadd` adds them. Value =
-  `content / (GetEntries()/52)`, where `GetEntries()/52` = number of samples
-  (`sampleSize` events each, plus one tail flush per AO2D - e.g. 7+8+8+7 = 30
-  for four AO2Ds).
-* `mFqSum{q}_bin{N}` / `mFqSq{q}_bin{N}` (`TH1D`) - sum and sum of squares of the
-  same per-sample Fq. Merge-safe, so the mean **and its error** can be rebuilt
-  after `hadd` of any number of jobs:
-
-  ```
-  N    = entries / 52
-  mean = sum / N
-  var  = (sumSq - N * mean^2) / (N - 1)
-  err  = sqrt(var / N)
-  ```
-
-* `mFqError{q}_bin{N}` - standard error of **one** job (`SetBinContent`, NOT
-  merge-safe). Corrected to the formula above (the original
-  `TH1::GetStdDev()/sqrt(n)` was biased by sqrt((n-1)/n) and returned 0 whenever
-  a value fell outside the 0..10 range of its scratch histogram).
+* `mFinalFq{q}_bin{N}` / `mFinalAvBin{q}_bin{N}` - filled once per accepted
+  event (`Fill(iM, value)`) and never reset, so `hadd` adds them. Values are
+  the event-level Fq numerator `sumfqBin / M^2` and the event occupancy
+  `binContent / M^2`. Their per-bin means give the independent event-level
+  cross-check of the pooled result: `mean(mFinalFq) / mean(mFinalAv)^q` over
+  all entries reproduces Fq of the whole event set (the `K = 0` pool).
 * `metaConfig` - a 1-bin `TH1D` whose **title** carries the effective job
   configuration (see the `metaConfig` section below). Histogram titles are taken
   from the first input of `hadd`, so the merged file stays self-describing.
@@ -389,9 +374,6 @@ Written by device `factorial-moments-task`, directory `factorial-moments-task`,
   border/pileup/ITS/z-vertex bits, `centrality`, `accepted`). `processRun3`
   fills the border and `kIsGoodITSLayersAll` steps, `processMCRec` fills
   `kIsVertexITSTPC` instead; steps a mode never applies stay empty.
-* `mSubsampleEvents` - one entry per flushed subsample, x = number of events in
-  the group (bin `sampleSize` = complete groups, smaller bins = end-of-stream
-  tail flushes).
 
 The merge-safe subsampling representation (see `slotpool.C` above), all under
 `slots/` and all written with `SetBinContent`:
@@ -425,7 +407,7 @@ effective configuration of the job (no `;` in it, otherwise ROOT would split the
 string into axis titles):
 
 ```
-FMtask centLimits=0,5 numPt=3 centralEta=0.9 sampleSize=3 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 flushTail=1 nSlots=1250 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
+FMtask centLimits=0,5 numPt=3 centralEta=0.9 ptMin=0.2 dcaXY=2.4 dcaZ=2 useMC=1 nfqOrder=6 smearPhi=1 nSlots=1250 vertexXYZ=0.3,0.4,10 ptCuts=0.2,2,0.4,2,0.4,1
 ```
 
 Histogram titles are not summed by `hadd`, so the merged file keeps this string -
@@ -438,10 +420,10 @@ is recommended once after upgrading the task.
 ## 8. Implementation notes (kept out of the source, per house style)
 
 * The `M` binning is `binningM[iM] = 2 * (iM + 2)`, i.e. M = 4, 6, ..., 106
-  (52 bins). Every sample fills every one of the 52 bins exactly once, so
-  `nSamples = GetEntries() / 52`. `slotpool.C` (`.dat` writer) and
-  `plotFqvsM.C` read the same M values back from the
-  `bin1/Reset/mEtaPhi<i>` binning instead of hardcoding them; when
+  (52 bins). Every accepted event fills every one of the 52 bins exactly once,
+  so `GetEntries() / 52` = accepted events for the per-event hists.
+  `slotpool.C` (`.dat` writer) and `plotFqvsM.C` read the same M values back
+  from the `bin1/Reset/mEtaPhi<i>` binning instead of hardcoding them; when
   `plotFqvsM.C` cannot reach the source root it falls back to `2*(i+2)`,
   which is exactly this binning.
 * The factorial numerator uses the falling factorial
@@ -453,22 +435,6 @@ is recommended once after upgrading the task.
   `smearPhi` option (default `false`, recorded in `metaConfig`); the shipped
   JSON files set it to `true` and the validated `.dat` files were produced with
   it on.
-* With `flushTailSample` (default `true`, recorded in `metaConfig` as
-  `flushTail=`), any partial group left at the end of a file
-  (`countSamples < sampleSize`) is flushed as one extra subsample of
-  `countSamples` events, instead of being silently dropped. The flush runs
-  inside the framework's end-of-stream hook: a `Service<FlushTailService>`
-  element declared **before** `histos` in the task gets its
-  `endOfStream()` called before the histogram registry is snapshotted, and it
-  calls back into the task (`mSubsampleEvents` records the group size of every
-  flush).
-  Subsamples are pooled **unweighted** (each sample counts once, as always), so
-  a 1-event tail carries the same weight as a complete `sampleSize`-event group
-  and its Fq is only resolvable down to one-event statistics - structural zeros
-  at high q / large M shift the merged mean by at most ~3 % (measured worst
-  case) and inflate the error modestly. Set `flushTailSample: false` to restore
-  the old drop-the-tail behaviour; a killed job never reaches the callback, so
-  its tail is lost regardless.
 * **Why `globalBC` and not a per-file or per-DataFrame index.** The bucket has
   to be a pure function of the event, because Hyperloop is free to chunk the
   input differently from one job to the next and nothing survives the merge
@@ -518,12 +484,13 @@ is recommended once after upgrading the task.
 * The eta-phi lattices are cleared lazily at the start of an event: only the
   pT bins that saw tracks in the previous event are `Reset()`, which is
   equivalent to clearing all of them but avoids zeroing ~5 MB of bins per event.
-* `fqEvent` and `binConEvent` are accumulated unconditionally (not only when a
-  sample is flushed) so both sums always run over exactly the same set of
-  events.
+* `fqEvent` and `binConEvent` are per-event accumulators (reset in
+  `beginEvent()`); the Fq numerator and its occupancy denominator therefore
+  always run over exactly the same set of events.
 * `TH1::GetStdDev()` is the population sigma (divides by n, not n-1) and
   silently ignores values outside the histogram range - it must not be used to
-  build a standard error; use `mFqSum`/`mFqSq` instead.
+  build a standard error; the spread is computed explicitly from the pooled
+  group values instead (`statOf()` in `slotpool.C`).
 * `TH1::SetTitle("text;x")` splits on the first `;`, so `GetTitle()` returns
   only `"text"`; `TSubString::Data()` is *not* null-terminated, copy into a
   `TString` before using it as a C string.

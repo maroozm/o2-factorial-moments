@@ -43,7 +43,7 @@ TDirectory* taskDir(TFile* f)
   while (auto* k = (TKey*)next()) {
     if (std::string(k->GetClassName()).find("TDirectory") == std::string::npos) continue;
     auto* d = dynamic_cast<TDirectory*>(f->Get(k->GetName()));
-    if (d && (d->Get("slots/nEv") || d->Get("mSubsampleEvents"))) return d;
+    if (d && d->Get("slots/nEv")) return d;
   }
   return nullptr;
 }

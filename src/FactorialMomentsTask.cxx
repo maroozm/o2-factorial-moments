@@ -50,27 +50,14 @@
 using namespace o2;
 using namespace o2::framework;
 using namespace o2::framework::expressions;
-struct FactorialMomentsTask;
-
-struct FlushTailService {
-  static FlushTailService& instance()
-  {
-    static FlushTailService svc;
-    return svc;
-  }
-  void endOfStream();
-  FactorialMomentsTask* task = nullptr;
-};
 
 struct FactorialMomentsTask {
-  Service<FlushTailService> flushTailService;
   Configurable<bool> useITS{"useITS", false, "Select tracks with ITS"};
   Configurable<bool> useTPC{"useTPC", false, "Select tracks with TPC"};
   Configurable<bool> useGlobal{"useGlobal", true, "Select global tracks"};
   Configurable<bool> applyCheckPtForRec{"applyCheckPtForRec", false, "Apply checkpT for reconstructed tracks"};
   Configurable<bool> applyCheckPtForMC{"applyCheckPtForMC", true, "Apply checkpT for MC-generated tracks"};
   Configurable<bool> smearPhi{"smearPhi", false, "Randomise track phi with a Gaussian of sigma=2pi before filling the eta-phi lattices"};
-  Configurable<bool> flushTailSample{"flushTailSample", true, "Flush a partial group of events as an extra subsample at end of stream"};
   Configurable<bool> evSelNoITSROFrameBorder{"evSelNoITSROFrameBorder", true, "ITSROFrame border event selection cut"};
   Configurable<bool> evSelNoTimeFrameBorder{"evSelNoTimeFrameBorder", true, "TimeFrame border event selection cut"};
   Configurable<float> centralEta{"centralEta", 0.9, "eta limit for tracks"};
@@ -95,7 +82,6 @@ struct FactorialMomentsTask {
   Configurable<bool> includeGlobalTracks{"includeGlobalTracks", false, "Enable Global Tracks"};
   Configurable<bool> includeTPCTracks{"includeTPCTracks", false, "TPC Tracks"};
   Configurable<bool> includeITSTracks{"includeITSTracks", false, "ITS Tracks"};
-  Configurable<int> sampleSize{"sampleSize", 100, "Sample size"};
   Configurable<int> nSlots{"nSlots", 1250, "Number of hash slots for merge-safe subsampling (slot = splitmix64(globalBC) % nSlots); must be identical for every job"};
   Configurable<bool> useMC{"useMC", false, "Use MC information"};
   Configurable<bool> useGlobalTrack{"useGlobalTrack", true, "Require global track in filter"};
@@ -163,14 +149,10 @@ struct FactorialMomentsTask {
   static constexpr int kEvCent = 9;
   static constexpr int kEvAccepted = 10;
   static constexpr int kNEventSteps = 10;
-  int countSamples = 0;
   std::array<int, nBins> binningM{};
   std::array<int, 5> countTracks{};
   std::array<std::array<std::array<double, nBins>, 5>, nfqOrder> fqEvent{};
-  std::array<std::array<std::array<double, nBins>, 5>, nfqOrder> fqEventSampled{};
   std::array<std::array<double, nBins>, 5> binConEvent{};
-  std::array<std::array<double, nBins>, 5> binConSampled{};
-  std::array<std::array<std::array<int, nBins>, 5>, nfqOrder> nSubsamples{};
   std::vector<std::shared_ptr<TH2>> mHistArrReset;
   std::vector<std::shared_ptr<TH1>> mHistEtaQA;
   std::vector<std::shared_ptr<TH1>> mHistPtQA;
@@ -179,13 +161,7 @@ struct FactorialMomentsTask {
   std::vector<std::shared_ptr<TH3>> mHistArrEff;
   std::vector<std::shared_ptr<TH1>> mFqBinFinal;
   std::vector<std::shared_ptr<TH1>> mBinConFinal;
-  std::vector<std::shared_ptr<TH1>> mFqBinFinalSampled;
-  std::vector<std::shared_ptr<TH1>> mBinConFinalSampled;
-  std::vector<std::shared_ptr<TH1>> mFqError;
-  std::vector<std::shared_ptr<TH1>> mFqSum;
-  std::vector<std::shared_ptr<TH1>> mFqSq;
-  // Merge-safe slot output: per-slot sums accumulated additively, so hadd of the
-  // per-job AnalysisResults.root is exactly equivalent to running over all files at once.
+  // merge-safe slot output: additive per-slot sums, hadd-exact
   std::shared_ptr<TH1> mSlotNev;
   std::vector<std::shared_ptr<TH2>> mSlotFq;
   std::vector<std::shared_ptr<TH2>> mSlotOcc;
@@ -193,16 +169,12 @@ struct FactorialMomentsTask {
 
   void init(o2::framework::InitContext&)
   {
-    FlushTailService::instance().task = this;
     if (numPt.value < 1 || numPt.value > 5) {
       LOG(fatal) << "numPt must be between 1 and 5, got " << numPt.value;
     }
     if (static_cast<int>(ptCuts.value.size()) < 2 * numPt.value) {
       LOG(fatal) << "ptCuts needs " << 2 * numPt.value << " values for numPt=" << numPt.value
                  << ", got " << ptCuts.value.size();
-    }
-    if (sampleSize.value < 1) {
-      LOG(fatal) << "sampleSize must be >= 1, got " << sampleSize.value;
     }
     if (nSlots.value < 1 || nSlots.value > 1000000) {
       LOG(fatal) << "nSlots must be in [1, 1000000], got " << nSlots.value;
@@ -213,9 +185,9 @@ struct FactorialMomentsTask {
     if (applyCheckPtForRec.value == applyCheckPtForMC.value) {
       LOG(fatal) << "exactly one of applyCheckPtForRec / applyCheckPtForMC must be enabled";
     }
-    TString cfg = Form("FMtask centLimits=%d,%d numPt=%d centralEta=%g sampleSize=%d ptMin=%g dcaXY=%g dcaZ=%g useMC=%d nfqOrder=%d smearPhi=%d flushTail=%d nSlots=%d",
+    TString cfg = Form("FMtask centLimits=%d,%d numPt=%d centralEta=%g ptMin=%g dcaXY=%g dcaZ=%g useMC=%d nfqOrder=%d smearPhi=%d nSlots=%d",
                        centLimits.value[0], centLimits.value[1], numPt.value, centralEta.value,
-                       sampleSize.value, ptMin.value, dcaXY.value, dcaZ.value, useMC.value ? 1 : 0, nfqOrder, smearPhi.value ? 1 : 0, flushTailSample.value ? 1 : 0, nSlots.value);
+                       ptMin.value, dcaXY.value, dcaZ.value, useMC.value ? 1 : 0, nfqOrder, smearPhi.value ? 1 : 0, nSlots.value);
     cfg += Form(" vertexXYZ=%g,%g,%g", vertexXYZ.value[0], vertexXYZ.value[1], vertexXYZ.value[2]);
     cfg += " ptCuts=";
     for (int i = 0; i < static_cast<int>(ptCuts.value.size()); i++) {
@@ -227,25 +199,11 @@ struct FactorialMomentsTask {
     for (int iStep = 0; iStep < kNEventSteps; ++iStep) {
       mEventSelected->GetXaxis()->SetBinLabel(iStep + 1, evLabels[iStep]);
     }
-    histos.add("mSubsampleEvents", "events per flushed subsample;events;subsamples", HistType::kTH1F, {{sampleSize.value, 0.5, sampleSize.value + 0.5}});
-    // Merge-safe slot output. Every accepted event adds to exactly one slot,
-    // slot = splitmix64(globalBC) % nSlots, so all quantities are accumulated with
-    // SetBinContent(get + add): plain sums that hadd reproduces exactly.
-    //   slots/nEv              TH1  events per slot
-    //   slots/sumFq_pt{p}_o{q} TH2  X = slot, Y = M, sum of fqEvent[iq][iPt][iM]
-    //   slots/sumOcc_pt{p}     TH2  X = slot, Y = M, sum of binConEvent[iPt][iM]
-    // Fq of any pooled set of slots S is then
-    //   (Sfq/n) / (Socc/n)^(q+2)   with n = sum of slots/nEv over S.
+    // merge-safe slot output: additive per-slot sums, hadd-exact (see slotpool.C)
     const AxisSpec slotAxis{nSlots.value, -0.5, nSlots.value - 0.5, ""};
     const AxisSpec slotMAxis{nBins, -0.5, nBins - 0.5, ""};
     mSlotNev = std::get<std::shared_ptr<TH1>>(histos.add("slots/nEv", "events per slot;slot;events", HistType::kTH1F, {slotAxis}));
-    // Campaign marker. hadd silently keeps the axis of its FIRST input when two
-    // jobs disagree about nSlots (measured: rc=0, no warning at all), and the
-    // event totals still add up because every job still counts each event once,
-    // so neither mEventSelected nor the invariant check can see the corruption.
-    // bin1 accumulates the number of merged jobs, bin2 the sum of their nSlots;
-    // slotpool.C compares bin2/bin1 with GetNbinsX() of slots/nEv, which only
-    // balances if every job used the same nSlots.
+    // bin1 = merged jobs, bin2 = sum of their nSlots: mismatch witness (hadd keeps the first axis silently)
     auto slotParams = std::get<std::shared_ptr<TH1>>(histos.add("slots/params", "slot campaign parameters;jobs;entries", HistType::kTH1D, {{2, 0.5, 2.5}}));
     slotParams->SetBinContent(1, 1.0);
     slotParams->SetBinContent(2, static_cast<double>(nSlots.value));
@@ -278,18 +236,6 @@ struct FactorialMomentsTask {
         mFqBinFinal.push_back(mHistFq);
         auto mHistAv = std::get<std::shared_ptr<TH1>>(histos.add(Form("mFinalAvBin%i_bin%i", i + 2, iPt + 1), Form("Final AvBin_%i for bin %.2f-%.2f;M", i + 2, ptCuts.value[2 * iPt], ptCuts.value[2 * iPt + 1]), HistType::kTH1F, {{nBins, -0.5, nBins - 0.5}}));
         mBinConFinal.push_back(mHistAv);
-        auto mHistFqSampled = std::get<std::shared_ptr<TH1>>(histos.add(Form("mFinalFq%iSampled_bin%i", i + 2, iPt + 1), Form("Final F_%i for bin %.2f-%.2f;M", i + 2, ptCuts.value[2 * iPt], ptCuts.value[2 * iPt + 1]), HistType::kTH1F, {{nBins, -0.5, nBins - 0.5}}));
-        mFqBinFinalSampled.push_back(mHistFqSampled);
-        auto mHistAvSampled = std::get<std::shared_ptr<TH1>>(histos.add(Form("mFinalAvBin%iSampled_bin%i", i + 2, iPt + 1), Form("Final AvBin_%i for bin %.2f-%.2f;M", i + 2, ptCuts.value[2 * iPt], ptCuts.value[2 * iPt + 1]), HistType::kTH1F, {{nBins, -0.5, nBins - 0.5}}));
-        mBinConFinalSampled.push_back(mHistAvSampled);
-
-        auto mHistError = std::get<std::shared_ptr<TH1>>(histos.add(Form("mFqError%i_bin%i", i + 2, iPt + 1), Form("Error for F_%i for bin %.2f-%.2f;M", i + 2, ptCuts.value[2 * iPt], ptCuts.value[2 * iPt + 1]), HistType::kTH1F, {{nBins, -0.5, nBins - 0.5}}));
-        mFqError.push_back(mHistError);
-
-        auto mHistSum = std::get<std::shared_ptr<TH1>>(histos.add(Form("mFqSum%i_bin%i", i + 2, iPt + 1), Form("Sum of F_%i samples for bin %.2f-%.2f;M", i + 2, ptCuts.value[2 * iPt], ptCuts.value[2 * iPt + 1]), HistType::kTH1D, {{nBins, -0.5, nBins - 0.5}}));
-        mFqSum.push_back(mHistSum);
-        auto mHistSq = std::get<std::shared_ptr<TH1>>(histos.add(Form("mFqSq%i_bin%i", i + 2, iPt + 1), Form("Sum of squares of F_%i samples for bin %.2f-%.2f;M", i + 2, ptCuts.value[2 * iPt], ptCuts.value[2 * iPt + 1]), HistType::kTH1D, {{nBins, -0.5, nBins - 0.5}}));
-        mFqSq.push_back(mHistSq);
       }
     }
   }
@@ -314,50 +260,7 @@ struct FactorialMomentsTask {
       }
     }
   }
-  void flushTailIfNeeded()
-  {
-    if (!flushTailSample || countSamples <= 0) {
-      return;
-    }
-    flushSample(countSamples);
-    countSamples = 0;
-  }
-  void flushSample(const int nGroup)
-  {
-    histos.fill(HIST("mSubsampleEvents"), nGroup);
-    for (int iPt = 0; iPt < numPt; ++iPt) {
-      for (int iM = 0; iM < nBins; ++iM) {
-        const double avM = binConSampled[iPt][iM] / nGroup;
-        for (int iq = 0; iq < nfqOrder; ++iq) {
-          mBinConFinalSampled[iPt * nfqOrder + iq]->Fill(iM, avM);
-          const double den = std::pow(avM, iq + 2);
-          const double fqM = fqEventSampled[iq][iPt][iM] / nGroup;
-          const double tmp = (den > 0.) ? fqM / den : 0.;
-          mFqBinFinalSampled[iPt * nfqOrder + iq]->Fill(iM, tmp);
-          mFqSum[iPt * nfqOrder + iq]->Fill(iM, tmp);
-          mFqSq[iPt * nfqOrder + iq]->Fill(iM, tmp * tmp);
-          ++nSubsamples[iq][iPt][iM];
-          const int nThisJob = nSubsamples[iq][iPt][iM];
-          double stdErr = 0.;
-          if (nThisJob > 1) {
-            const double sumThis = mFqSum[iPt * nfqOrder + iq]->GetBinContent(iM + 1);
-            const double sumSqThis = mFqSq[iPt * nfqOrder + iq]->GetBinContent(iM + 1);
-            const double meanThis = sumThis / nThisJob;
-            const double varThis = (sumSqThis - nThisJob * meanThis * meanThis) / (nThisJob - 1);
-            if (varThis > 0.)
-              stdErr = std::sqrt(varThis / nThisJob);
-          }
-          mFqError[iPt * nfqOrder + iq]->SetBinContent(iM + 1, stdErr);
-          fqEventSampled[iq][iPt][iM] = 0;
-        }
-        binConSampled[iPt][iM] = 0;
-      }
-    }
-  }
-  // splitmix64 (Steele, Lea, Flood 2014): a fast integer finalizer with good
-  // avalanche behaviour, used here as a deterministic, stateless hash of the
-  // global BC. No per-file or per-job state, so the slot an event lands in does
-  // not depend on how Hyperloop chunked the input files.
+  // splitmix64: deterministic stateless hash of the global BC
   static uint64_t slotOf(uint64_t x)
   {
     x += 0x9e3779b97f4a7c15ULL;
@@ -365,12 +268,7 @@ struct FactorialMomentsTask {
     x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
     return x ^ (x >> 31);
   }
-  // Fold the current accepted event into its slot. Strictly additive
-  // (SetBinContent of GetBinContent + contribution) and deliberately never uses
-  // Fill(x, y, w): a non-unit weight makes ROOT allocate fSumw2 as a TArrayD,
-  // tripling the footprint for something hadd would then double-count.
-  // slot is a modulo result and iM < nBins by loop bound, so no bin can overflow
-  // into the under/overflow ranges.
+  // additive fold of the current accepted event into its slot (never Fill with weights: no fSumw2, hadd-exact)
   void accumulateSlot()
   {
     const int slot = static_cast<int>(slotOf(mEventGlobalBC) % static_cast<uint64_t>(nSlots.value));
@@ -388,8 +286,7 @@ struct FactorialMomentsTask {
   }
   void calculateMoments(const std::vector<std::shared_ptr<TH2>>& hist)
   {
-    countSamples++;
-    // Calculate the normalized factorial moments
+    // normalized factorial moments per accepted event, per pT bin and M
     for (int iPt = 0; iPt < numPt; ++iPt) {
       for (int iM = 0; iM < nBins; ++iM) {
         double binContent = 0;
@@ -415,18 +312,12 @@ struct FactorialMomentsTask {
           }
         }
         binConEvent[iPt][iM] = binContent / m2;
-        binConSampled[iPt][iM] += binConEvent[iPt][iM];
         for (int iq = 0; iq < nfqOrder; ++iq) {
           fqEvent[iq][iPt][iM] = sumfqBin[iq] / m2;
-          fqEventSampled[iq][iPt][iM] += fqEvent[iq][iPt][iM];
           mFqBinFinal[iPt * nfqOrder + iq]->Fill(iM, fqEvent[iq][iPt][iM]);
           mBinConFinal[iPt * nfqOrder + iq]->Fill(iM, binConEvent[iPt][iM]);
         }
       }
-    }
-    if (countSamples == sampleSize) {
-      flushSample(sampleSize);
-      countSamples = 0;
     }
     accumulateSlot();
   }
@@ -719,13 +610,6 @@ struct FactorialMomentsTask {
   }
   PROCESS_SWITCH(FactorialMomentsTask, processRun2, "for RUN2", false);
 };
-
-inline void FlushTailService::endOfStream()
-{
-  if (task != nullptr) {
-    task->flushTailIfNeeded();
-  }
-}
 
 WorkflowSpec defineDataProcessing(ConfigContext const& cfgc)
 {
