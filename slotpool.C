@@ -1,11 +1,16 @@
 // Post-hadd reconstruction of Fq from the merge-safe slot output.
 //
-//   root -l -b -q 'slotpool.C+("results_v2/merged/AnalysisResults.root", 20, "results_v2/merged/AnalysisResults.root")'
+//   root -l -b -q 'slotpool.C+("results_v2/merged/AnalysisResults.root", 20)'
 //
 // Arguments: file, K (target events per subsample; <= 0 pools everything into
-// one group), baseline file ("" to skip the old-path comparison), csv path,
-// keepTail (1 = retain the trailing partial group, 0 = drop it so every
-// subsample really has >= K events).
+// one group), baseline file ("" to skip the old-path comparison -- console
+// sanity table only, nothing old is ever written to a file), csv path ("" =
+// no CSV; otherwise the NEW-path columns  pt,q,M,nGroups,meanNew,errNew
+// behind a '#' header block), keepTail (1 = retain the trailing partial
+// group, 0 = drop it so every subsample really has >= K events), datDir
+// (default "dat_slots": write FactorialMoments_bin*.dat there in checkFMo2.C's
+// exact layout -- new-path values only -- so the pooled result can be diffed
+// against a reference .dat with compare_dat.py; "" = skip).
 //
 // Input objects written by FactorialMomentsTask (under the
 // factorial-moments-task/ directory O2 creates for the device):
@@ -32,15 +37,19 @@
 // recomputed from their merged sums (mFqError is per-job and does not survive
 // hadd) and printed alongside.
 
+#include "TDatime.h"
 #include "TDirectory.h"
 #include "TFile.h"
 #include "TH1.h"
 #include "TH2.h"
 #include "TKey.h"
 #include "TString.h"
+#include "TSystem.h"
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -125,13 +134,177 @@ TH2* get2(TDirectory* d, const TString& name)
   if (!h) printf("  !! missing %s\n", name.Data());
   return h;
 }
+
+struct Cell {
+  double mean = 0.;
+  double err = 0.;
+};
+// pt bin -> M index (0-based, same indexing as the slot TH2 Y axis) -> order
+using PtCells = std::map<int, std::map<int, std::map<int, Cell>>>;
+
+const Cell* findCell(const PtCells& c, int p, int m, int q)
+{
+  auto ip = c.find(p);
+  if (ip == c.end()) return nullptr;
+  auto im = ip->second.find(m);
+  if (im == ip->second.end()) return nullptr;
+  auto iq = im->second.find(q);
+  if (iq == im->second.end()) return nullptr;
+  return &iq->second;
+}
+
+// Lattice size per M index, read exactly the way checkFMo2.C's detectSetup()
+// does it: the cell count of bin1/Reset/mEtaPhi{i}, falling back to 2*(i+2).
+// Anything else and the first column would not line up with the reference .dat.
+std::vector<int> latticeM(TDirectory* td, int nM)
+{
+  std::vector<int> mv;
+  mv.reserve(nM);
+  for (int i = 0; i < nM; ++i) {
+    auto* h = dynamic_cast<TH1*>(td->Get(Form("bin1/Reset/mEtaPhi%d", i)));
+    mv.push_back(h ? h->GetNbinsX() : 2 * (i + 2));
+  }
+  return mv;
+}
+
+// Reproduce checkFMo2.C's processBin() byte layout, substituting the
+// slot-pooled statistics for the old-path mFqSum/mFqSq ones, so the resulting
+// FactorialMoments_bin*.dat can be diffed directly against the reference.
+
+// Read one space-delimited value out of the metaConfig histogram title, the
+// same way checkFMo2.C's configValue() does.
+static std::string metaValue(TDirectory* td, const char* key)
+{
+  auto* meta = dynamic_cast<TH1*>(td->Get("metaConfig"));
+  if (!meta)
+    return {};
+  const std::string cfg = meta->GetTitle();
+  const std::string k = std::string(key) + "=";
+  auto p = cfg.find(k);
+  if (p == std::string::npos)
+    return {};
+  p += k.size();
+  auto e = cfg.find(' ', p);
+  return (e == std::string::npos) ? cfg.substr(p) : cfg.substr(p, e - p);
+}
+
+static std::vector<double> listNums(const std::string& s)
+{
+  std::vector<double> v;
+  std::string tok;
+  for (char c : s) {
+    if (c == ',' || c == ' ' || c == '\t' || c == '\n') {
+      if (!tok.empty()) {
+        v.push_back(std::atof(tok.c_str()));
+        tok.clear();
+      }
+    } else {
+      tok.push_back(c);
+    }
+  }
+  if (!tok.empty())
+    v.push_back(std::atof(tok.c_str()));
+  return v;
+}
+
+// Centrality range for the headers: metaConfig's centLimits when present,
+// otherwise the observed span of the first available centrality histogram
+// (same candidate order checkFMo2.C uses).
+static bool centRange(TDirectory* td, double* lo, double* hi)
+{
+  const auto cl = listNums(metaValue(td, "centLimits"));
+  if (cl.size() >= 2) {
+    *lo = cl[0];
+    *hi = cl[1];
+    return true;
+  }
+  const char* cand[4] = {"mCentFT0C", "mCentFT0M", "mCentFV0A", "mCentFT0A"};
+  for (int i = 0; i < 4; ++i) {
+    auto* h = dynamic_cast<TH1*>(td->Get(cand[i]));
+    if (!h)
+      continue;
+    int first = -1, last = -1;
+    for (int b = 1; b <= h->GetNbinsX(); ++b)
+      if (h->GetBinContent(b) > 0.) {
+        if (first < 0)
+          first = b;
+        last = b;
+      }
+    if (first > 0) {
+      *lo = h->GetXaxis()->GetBinLowEdge(first);
+      *hi = h->GetXaxis()->GetBinUpEdge(last);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Build checkFMo2.C's "# pT bin N: <range> | centrality .. | subsamples .."
+// header line from the file's metaConfig, so a slot .dat is as self-describing
+// as one written straight from an AnalysisResults.root.
+static std::string ptHeader(TDirectory* td, int ptBin, int nGroups)
+{
+  std::string s = Form("# pT bin %d:", ptBin);
+  const auto pt = listNums(metaValue(td, "ptCuts"));
+  if ((int)pt.size() >= 2 * ptBin)
+    s += Form(" %.2f-%.2f GeV/c", pt[2 * (ptBin - 1)], pt[2 * (ptBin - 1) + 1]);
+  else
+    s += Form(" bin %d", ptBin);
+
+  double centLo = 0., centHi = 0.;
+  if (centRange(td, &centLo, &centHi))
+    s += Form(" | centrality %.0f-%.0f %%", centLo, centHi);
+  s += Form(" | subsamples %d", nGroups);
+
+  const auto eta = metaValue(td, "centralEta");
+  if (!eta.empty())
+    s += Form(" | |eta| <= %.2f", std::atof(eta.c_str()));
+  const auto vtx = listNums(metaValue(td, "vertexXYZ"));
+  if (vtx.size() >= 3)
+    s += Form(" | |vz| <= %.1f", vtx[2]);
+  return s;
+}
+
+void writeDat(const std::string& path, const char* src, const PtCells& cells,
+              int ptBin, int nBins, const std::vector<int>& mv,
+              const std::vector<int>& orders, int nGroups,
+              const std::string& header, int K)
+{
+  FILE* fp = fopen(path.c_str(), "w");
+  if (!fp) { printf("  !! cannot write %s\n", path.c_str()); return; }
+  fprintf(fp, "# source: %s\n", src);
+  fprintf(fp, "%s\n", header.c_str());
+  fprintf(fp, "# method: slot-pooled, K=%d, groups=%d\n", K, nGroups);
+  fprintf(fp, "#M2 lnM2");
+  for (int q : orders) fprintf(fp, " lnF%d errF%d", q, q);
+  fprintf(fp, "\n");
+  fprintf(fp, "# err = sigma(Fq)/mean(Fq), i.e. the error on ln(Fq);"
+              " entries with Fq <= 0 are written as -999 -999\n");
+  for (int m = 0; m < nBins; ++m) {
+    // checkFMo2.C writes mval*mval as an int (setprecision has no effect on
+    // integers), so print it as one or the first column would not match.
+    const int m2 = mv[m] * mv[m];
+    fprintf(fp, "%d %.8f", m2, std::log(static_cast<double>(m2)));
+    for (int q : orders) {
+      const Cell* c = findCell(cells, ptBin, m, q);
+      if (c && c->mean > 0. && std::isfinite(c->mean))
+        fprintf(fp, " %.8f %.8f", std::log(c->mean), c->err / c->mean);
+      else
+        fprintf(fp, " -999 -999");
+    }
+    fprintf(fp, "\n");
+  }
+  fclose(fp);
+  printf("  wrote %s\n", path.c_str());
+}
 } // namespace
 
 void slotpool(const char* fileName,
               int K = 20,
               const char* baselineFile = "",
-              const char* csvFile = "slotpool.csv",
-              int keepTail = 0)
+              const char* csvFile = "",
+              int keepTail = 0,
+              const char* datDir = "dat_slots")
 {
   auto* f = TFile::Open(fileName, "READ");
   if (!f || f->IsZombie()) { printf("cannot open %s\n", fileName); return; }
@@ -172,9 +345,10 @@ void slotpool(const char* fileName,
   printf("  subsamples formed   : %zu\n", groups.size());
   printf("  events pooled       : %d\n", pooled);
   printf("  events dropped (tail): %d\n", dropped);
+  int accepted = -1;
   auto* sel = dynamic_cast<TH1*>(td->Get("mEventSelected"));
   if (sel) {
-    const int accepted = static_cast<int>(sel->GetBinContent(10)); // kEvAccepted = 10
+    accepted = static_cast<int>(sel->GetBinContent(10)); // kEvAccepted = 10
     printf("  mEventSelected accepted: %d   -> slots total: %d   %s\n",
            accepted, pooled + dropped,
            accepted == pooled + dropped ? "[OK]" : "[!! MISMATCH]");
@@ -211,7 +385,40 @@ void slotpool(const char* fileName,
   FILE* csv = nullptr;
   if (csvFile && csvFile[0]) {
     csv = fopen(csvFile, "w");
-    if (csv) fprintf(csv, "pt,q,M,nGroups,meanNew,errNew,meanOld,errOld\n");
+    if (csv) {
+      // '#' header block: skipped by plotdat.C / plotratio.C (they ignore lines
+      // starting with '#'), so the CSV is self-describing without breaking them.
+      TString full = gSystem->ExpandPathName(fileName);
+      if (!full.BeginsWith("/")) full = TString(gSystem->pwd()) + "/" + full;
+      fprintf(csv, "# source : %s\n", full.Data());
+      fprintf(csv, "# date   : %s\n", TDatime().AsString());
+      fprintf(csv, "# K      : %d      keepTail: %d      subsamples: %zu\n", K, keepTail,
+              groups.size());
+      fprintf(csv, "# nSlots : %d (%d non-empty)      events: %d", G, nonEmpty, pooled + dropped);
+      if (accepted >= 0) fprintf(csv, " (accepted: %d)", accepted);
+      fprintf(csv, "\n");
+      double centLo = 0., centHi = 0.;
+      if (centRange(td, &centLo, &centHi))
+        fprintf(csv, "# cent   : %.0f-%.0f %%\n", centLo, centHi);
+      const auto eta = metaValue(td, "centralEta");
+      if (!eta.empty())
+        fprintf(csv, "# eta    : |eta| <= %.2f\n", std::atof(eta.c_str()));
+      const auto vtx = listNums(metaValue(td, "vertexXYZ"));
+      if (vtx.size() >= 3)
+        fprintf(csv, "# vertex : |vz| <= %.1f cm\n", vtx[2]);
+      const auto pt = listNums(metaValue(td, "ptCuts"));
+      std::string ptLine = "# pt bins: ";
+      for (size_t i = 0; i < ptBins.size(); ++i) {
+        const int p = ptBins[i];
+        if (i) ptLine += "  ";
+        if ((int)pt.size() >= 2 * p)
+          ptLine += Form("%d: %.2f-%.2f GeV/c", p, pt[2 * (p - 1)], pt[2 * (p - 1) + 1]);
+        else
+          ptLine += Form("%d: bin %d", p, p);
+      }
+      if (ptLine.find(':') != std::string::npos) fprintf(csv, "%s\n", ptLine.c_str());
+      fprintf(csv, "pt,q,M,nGroups,meanNew,errNew\n");
+    }
   }
 
   printf("=== Fq (new slots vs old) ===\n");
@@ -221,6 +428,7 @@ void slotpool(const char* fileName,
   double worstRel = 0;
   int worstQ = -1, worstPt = -1, worstM = -1;
   double worstNew = 0, worstOld = 0;
+  PtCells cells; // pooled statistics, buffered so the .dat can be written in M order
 
   for (int p : ptBins) {
     auto* occ = get2(td, Form("slots/sumOcc_pt%d", p));
@@ -249,6 +457,8 @@ void slotpool(const char* fileName,
         }
         const Stat sn = statOf(vals);
 
+        { Cell c; c.mean = sn.mean; c.err = sn.err; cells[p][m][q] = c; }
+
         Stat so;
         if (oldSum && oldSq && nOld > 1) {
           const double s = oldSum->GetBinContent(m + 1);
@@ -263,8 +473,8 @@ void slotpool(const char* fileName,
         }
 
         if (csv) {
-          fprintf(csv, "%d,%d,%d,%d,%.10g,%.10g,%.10g,%.10g\n",
-                  p, q, m + 1, sn.n, sn.mean, sn.err, so.mean, so.err);
+          fprintf(csv, "%d,%d,%d,%d,%.10g,%.10g\n",
+                  p, q, m + 1, sn.n, sn.mean, sn.err);
         }
         // only print a few M per (p,q) to keep the table readable
         if (m == 0 || m == fq->GetNbinsY() / 2 || m == fq->GetNbinsY() - 1) {
@@ -284,6 +494,27 @@ void slotpool(const char* fileName,
   }
 
   if (csv) { fclose(csv); printf("\nwrote %s\n", csvFile); }
+
+  if (datDir && datDir[0]) {
+    gSystem->mkdir(datDir, kTRUE);
+    printf("\n=== .dat (checkFMo2 layout, from pooled slots) ===\n");
+    for (int p : ptBins) {
+      int nM = 0;
+      if (auto* occY = dynamic_cast<TH2*>(td->Get(Form("slots/sumOcc_pt%d", p))))
+        nM = occY->GetNbinsY();
+      // nBins must be the one checkFMo2.C reports, i.e. the X bins of
+      // mFinalFq2Sampled_bin{p}; the slot Y axis is only the fallback.
+      if (auto* hf = dynamic_cast<TH1*>(td->Get(Form("mFinalFq2Sampled_bin%d", p))))
+        nM = hf->GetNbinsX();
+      if (nM <= 0) { printf("  !! pt bin %d: cannot determine M bins\n", p); continue; }
+      const std::vector<int> mv = latticeM(td, nM);
+      const std::string path =
+        std::string(datDir) + Form("/FactorialMoments_bin%d.dat", p);
+      const int nGrp = static_cast<int>(groups.size());
+      writeDat(path, fileName, cells, p, nM, mv, orders, nGrp,
+               ptHeader(td, p, nGrp), K);
+    }
+  }
 
   if (worstQ > 0) {
     printf("\n=== worst relative difference ===\n");
