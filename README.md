@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="O2 CVMFS — Factorial Moments" width="216">
+  <img src="logo.png" alt="O2 CVMFS — Factorial Moments" width="206">
 </p>
 
 # Factorial Moments (ALICE O2Physics)
