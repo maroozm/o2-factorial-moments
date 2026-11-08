@@ -119,7 +119,7 @@ Main task options:
 | `useITS`, `useTPC`, `useGlobal` | false, false, true | require ITS, TPC, global tracks |
 
 Note on track cuts: `useDcaCut` switches the hard-coded ITS parameterisation
-`|dca_xy| < 0.0105 + 0.035 / pT^1.1` (`kDcaXY0/1/2`); there is no DCA_z cut.
+`|dca_xy| < 0.0105 + 0.035 / pT^1.1` (`DcaXY0/1/2`); there is no DCA_z cut.
 `useCrossedRows`, `useTPCChi2` and `useTPCCluster` switch the
 `minTPCCrossedRows`, `maxTPCChi2NCl` and `minTPCClusters` cuts respectively,
 and `usePVContributor` requires `isPVContributor()` on the Run 3 paths. The
