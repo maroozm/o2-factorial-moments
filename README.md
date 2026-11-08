@@ -111,17 +111,24 @@ Main task options:
 | `useMC` | false | echoed into `metaConfig`; MC handling follows the process switches |
 | `smearPhi` | false | randomise track phi (Gaussian, sigma=2pi) before filling the eta-phi lattices (the shipped JSONs set it to `true`) |
 | `nSlots` | 1250 | hash buckets for merge-safe subsampling, `slot = splitmix64(globalBC) % nSlots` (recorded in `metaConfig` as `nSlots=`). **Must be identical in every job of a campaign**, see below |
+| `useDcaCut` | true | switch the hard-coded DCA_xy parameterisation below |
+| `usePVContributor` | true | require `track.isPVContributor()` (Run 3 reco / MC-reco paths) |
+| `useCrossedRows` | true | require `tpcNClsCrossedRows() >= minTPCCrossedRows` |
+| `useTPCChi2` | true | require `tpcChi2NCl() <= maxTPCChi2NCl` |
+| `useTPCCluster` | false | require `tpcNClsFound() >= minTPCClusters` |
+| `useITS`, `useTPC`, `useGlobal` | false, false, true | require ITS, TPC, global tracks |
 
-Note on DCA: the cut that is actually applied to reconstructed tracks is the
-hard-coded ITS parameterisation `|dca_xy| < 0.0105 + 0.035 / pT^1.1`
-(`kDcaXY0/1/2`); there is no DCA_z cut. The following options are accepted (the
-shipped JSON files set them) but are currently **not applied by any cut** - they
-are kept only so the configuration files keep parsing: `maxTPCChi2NCl`,
-`maxITSChi2NCl`, `minITSClusters`, `minTPCClusters`, `minTPCCrossedRows`,
+Note on track cuts: `useDcaCut` switches the hard-coded ITS parameterisation
+`|dca_xy| < 0.0105 + 0.035 / pT^1.1` (`kDcaXY0/1/2`); there is no DCA_z cut.
+`useCrossedRows`, `useTPCChi2` and `useTPCCluster` switch the
+`minTPCCrossedRows`, `maxTPCChi2NCl` and `minTPCClusters` cuts respectively,
+and `usePVContributor` requires `isPVContributor()` on the Run 3 paths. The
+following options are accepted (the shipped JSON files set them) but are
+currently **not applied by any cut** - they are kept only so the configuration
+files keep parsing: `maxITSChi2NCl`, `minITSClusters`,
 `minTPCCrossedRowsOverFindableCls`, `evSelVertexTOFmatched`,
 `evSelVertexTRDmatched`, `applyExtraCorrCut`, `applyExtraPhiCut`,
-`includeGlobalTracks`, `includeTPCTracks`, `includeITSTracks`, `useGlobalTrack`,
-`reduceOutput`.
+`includeGlobalTracks`, `includeTPCTracks`, `includeITSTracks`, `reduceOutput`.
 
 ## 4. Running on CVMFS (lxplus and friends)
 

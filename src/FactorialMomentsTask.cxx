@@ -53,6 +53,11 @@ using namespace o2::framework;
 using namespace o2::framework::expressions;
 
 struct FactorialMomentsTask {
+  Configurable<bool> useDcaCut{"useDcaCut", true, "Enable DCA cut"};
+  Configurable<bool> usePVContributor{"usePVContributor", true,
+                                      "Require the track to contribute to the primary-vertex fit (Run 3)"};
+  Configurable<bool> useTPCChi2{"useTPCChi2", true, "Enable TPC chi2 cut"};
+  Configurable<bool> useTPCCluster{"useTPCCluster", false, "Select tracks with TPCCluster"};
   Configurable<bool> useITS{"useITS", false, "Select tracks with ITS"};
   Configurable<bool> useTPC{"useTPC", false, "Select tracks with TPC"};
   Configurable<bool> useGlobal{"useGlobal", true, "Select global tracks"};
@@ -66,7 +71,7 @@ struct FactorialMomentsTask {
   Configurable<float> ptMin{"ptMin", 0.2f, "lower pT cut"};
   Configurable<float> dcaXY{"dcaXY", 0.1f, "DCA xy cut"};
   Configurable<float> dcaZ{"dcaZ", 1.0f, "DCA z cut"};
-  Configurable<float> maxTPCChi2NCl{"maxTPCChi2NCl", 2.5f, "Maximum TPCchi2NCl"};
+  Configurable<float> maxTPCChi2NCl{"maxTPCChi2NCl", 4.0f, "Maximum TPCchi2NCl"};
   Configurable<float> maxITSChi2NCl{"maxITSChi2NCl", 40.0f, "Maximum ITSchi2NCl"};
   Configurable<float> minTPCNCls{"minTPCNCls", 70.0f, "minimum number of TPC clusters"};
   Configurable<std::vector<int>> centLimits{"centLimits", {0, 5}, "centrality min and max"};
@@ -85,9 +90,9 @@ struct FactorialMomentsTask {
   Configurable<bool> includeITSTracks{"includeITSTracks", false, "ITS Tracks"};
   Configurable<int> nSlots{"nSlots", 1250, "Number of hash slots for merge-safe subsampling (slot = splitmix64(globalBC) % nSlots); must be identical for every job"};
   Configurable<bool> useMC{"useMC", false, "Use MC information"};
-  Configurable<bool> useGlobalTrack{"useGlobalTrack", true, "Require global track in filter"};
+  Configurable<bool> useCrossedRows{"useCrossedRows", true, "Require minimum number of TPC crossed rows"};
   Configurable<int> minITSClusters{"minITSClusters", 6, "Minimum Number of ITS cluster"};
-  Configurable<int> minTPCClusters{"minTPCClusters", 80, "Minimum Number of TPC cluster"};
+  Configurable<int> minTPCClusters{"minTPCClusters", 70, "Minimum Number of TPC cluster"};
   Configurable<int> minTPCCrossedRows{"minTPCCrossedRows", 70, "Minimum Number of TPC crossed-rows"};
   Configurable<float> minTPCCrossedRowsOverFindableCls{"minTPCCrossedRowsOverFindableCls", 0.8, "Minimum ratio of crossed rows over findable clusters TPC"};
   Configurable<int> reduceOutput{"reduceOutput", 0, "Suppress info level output (0 = all output, 1 = per collision, 2 = none)"};
@@ -194,6 +199,12 @@ struct FactorialMomentsTask {
     for (int i = 0; i < static_cast<int>(ptCuts.value.size()); i++) {
       cfg += Form("%s%g", i > 0 ? "," : "", ptCuts.value[i]);
     }
+    cfg += Form(" useDcaCut=%d usePVContributor=%d useTPCChi2=%d useTPCCluster=%d useCrossedRows=%d",
+                useDcaCut.value ? 1 : 0, usePVContributor.value ? 1 : 0, useTPCChi2.value ? 1 : 0,
+                useTPCCluster.value ? 1 : 0, useCrossedRows.value ? 1 : 0);
+    cfg += Form(" useITS=%d useTPC=%d useGlobal=%d maxTPCChi2NCl=%g minTPCClusters=%d minTPCCrossedRows=%d",
+                useITS.value ? 1 : 0, useTPC.value ? 1 : 0, useGlobal.value ? 1 : 0,
+                maxTPCChi2NCl.value, minTPCClusters.value, minTPCCrossedRows.value);
     histos.add("metaConfig", cfg.Data(), HistType::kTH1D, {{1, 0.5, 1.5}});
     auto mEventSelected = std::get<std::shared_ptr<TH1>>(histos.add("mEventSelected", "eventSelected", HistType::kTH1D, {{kNEventSteps, 0.5, kNEventSteps + 0.5}}));
     const std::array<const char*, kNEventSteps> evLabels = {"all", "sel8", "kNoITSROFrameBorder", "kNoTimeFrameBorder", "kNoSameBunchPileup", "kIsGoodITSLayersAll", "kIsGoodZvtxFT0vsPV", "kIsVertexITSTPC", "centrality", "accepted"};
@@ -446,6 +457,36 @@ struct FactorialMomentsTask {
     return true;
   }
 
+  template <typename T>
+  bool selectTrack(const T& track)
+  {
+    if (useITS && !track.hasITS()) {
+      return false;
+    }
+    if (useTPC && !track.hasTPC()) {
+      return false;
+    }
+    if (useGlobal && !track.isGlobalTrack()) {
+      return false;
+    }
+    if (useCrossedRows && track.tpcNClsCrossedRows() < minTPCCrossedRows) {
+      return false;
+    }
+    if (useDcaCut && !passDcaCut(track)) {
+      return false;
+    }
+    if (usePVContributor && !track.isPVContributor()) {
+      return false;
+    }
+    if (useTPCChi2 && track.tpcChi2NCl() > maxTPCChi2NCl) {
+      return false;
+    }
+    if (useTPCCluster && track.tpcNClsFound() < minTPCClusters) {
+      return false;
+    }
+    return true;
+  }
+
   void beginEvent()
   {
     for (int iPt = 0; iPt < numPt; ++iPt) {
@@ -488,16 +529,7 @@ struct FactorialMomentsTask {
     histos.fill(HIST("mCentFT0C"), coll.centFT0C());
     beginEvent();
     for (auto const& track : tracks) {
-      if (useITS && !track.hasITS()) {
-        continue;
-      }
-      if (useTPC && !track.hasTPC()) {
-        continue;
-      }
-      if (useGlobal && !track.isGlobalTrack()) {
-        continue;
-      }
-      if (!passDcaCut(track)) {
+      if (!selectTrack(track)) {
         continue;
       }
       fillTrackQA(track);
@@ -523,16 +555,7 @@ struct FactorialMomentsTask {
     histos.fill(HIST("mCentFT0C"), coll.centFT0C());
     beginEvent();
     for (auto const& track : colltracks) {
-      if (useITS && !track.hasITS()) {
-        continue;
-      }
-      if (useTPC && !track.hasTPC()) {
-        continue;
-      }
-      if (useGlobal && !track.isGlobalTrack()) {
-        continue;
-      }
-      if (!passDcaCut(track)) {
+      if (!selectTrack(track)) {
         continue;
       }
       fillTrackQA(track);
